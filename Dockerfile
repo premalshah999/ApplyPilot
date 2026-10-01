@@ -21,8 +21,9 @@ RUN uv sync --frozen --no-dev --no-install-project && \
     .venv/bin/playwright install --with-deps chromium && \
     rm -rf /var/lib/apt/lists/*
 COPY jobpilot/ ./jobpilot/
-COPY LICENSE docs/third-party.md ./
-COPY docs/licenses/ ./licenses/
+COPY LICENSE ./
+COPY docs/third-party.md ./docs/third-party.md
+COPY docs/licenses/ ./docs/licenses/
 COPY --from=dashboard /build/jobpilot/static ./jobpilot/static
 RUN uv sync --frozen --no-dev && \
     useradd --uid 10001 --create-home pilot && \

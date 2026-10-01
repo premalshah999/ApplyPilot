@@ -21,7 +21,7 @@ from sqlalchemy import func, select
 
 from .ats import catalog
 from .config import Settings, settings
-from .db import Budget, Database, Event, Job, Resume, Review, Run, Source, record
+from .db import Budget, Database, Event, Job, Resume, Review, Run, Setting, Source, now, record
 from .discovery import add_job, rank
 from .network import public_url
 from .schemas import JobInput, Profile, QueueInput, SourceInput
@@ -309,6 +309,12 @@ def create_app(config: Settings | None = None):
                 record(x) for x in s.scalars(select(Event).where(Event.run_id == run_id).order_by(Event.id))
             ]
             result = {k: v for k, v in record(run).items() if k != "packet"}
+            job = s.get(Job, run.job_id)
+            demo_receipt = None
+            if job and job.demo:
+                nonce = urlsplit(job.url).path.rsplit("/", 1)[-1]
+                saved = s.get(Setting, "demo_receipt:" + nonce)
+                demo_receipt = saved.value if saved else {"submissions": 0}
         folder = config.data_dir / "runs" / run_id
         ledger = (
             json.loads((folder / "answers.json").read_text()) if (folder / "answers.json").exists() else {}
@@ -318,6 +324,7 @@ def create_app(config: Settings | None = None):
             "events": events,
             "answers": ledger,
             "screenshot": (folder / "final.png").exists(),
+            "demo_receipt": demo_receipt,
         }
 
     @app.get("/api/runs/{run_id}/screenshot")
@@ -487,8 +494,35 @@ def create_app(config: Settings | None = None):
         if not config.enable_demo or not valid_demo(db, "/demo/form/" + nonce):
             raise HTTPException(404)
         data = await request.form()
-        if data.get("email") != "alex@example.test" or not data.get("resume"):
-            raise HTTPException(422, "Synthetic test fields missing")
+        expected = {
+            "first_name": "Alex",
+            "last_name": "Example",
+            "email": "alex@example.test",
+            "phone": "2025550100",
+            "city": "New York",
+            "gender": "Prefer not to identify",
+        }
+        if any(data.get(key) != value for key, value in expected.items()):
+            raise HTTPException(422, "Synthetic test fields do not match the expected applicant")
+        upload = data.get("resume")
+        if not hasattr(upload, "read"):
+            raise HTTPException(422, "Synthetic test resume missing")
+        content = await upload.read(5 * 1024 * 1024 + 1)
+        digest = hashlib.sha256(content).hexdigest()
+        with db.exclusive() as s:
+            resume = s.scalar(select(Resume).where(Resume.demo.is_(True)))
+            if not resume or digest != resume.sha256:
+                raise HTTPException(422, "Synthetic test resume checksum does not match")
+            saved = s.get(Setting, "demo_receipt:" + nonce)
+            receipt = {
+                "submissions": (saved.value["submissions"] if saved else 0) + 1,
+                "resume_sha256": digest,
+                "received_at": now(),
+            }
+            if saved:
+                saved.value = receipt
+            else:
+                s.add(Setting(key="demo_receipt:" + nonce, value=receipt))
         return (
             "<h1>Thank you for applying!</h1><p>Your application has been received.</p><p>Demo receipt: "
             + nonce

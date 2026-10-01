@@ -15,10 +15,21 @@ git clone https://github.com/premalshah999/ApplyPilot.git
 cd ApplyPilot
 cp .env.example .env
 docker compose up --build -d
+docker compose exec app jobpilot verify
 docker compose exec app jobpilot token
 ```
 
 Open **http://127.0.0.1:8080**, paste the token, and choose **Run the local demo**. No provider keys are required. A real Chromium process fills a synthetic applicant's form, uploads a synthetic PDF, submits to this installation, and captures a receipt. Demo submissions never count toward real application statistics.
+
+`jobpilot verify` must print **PASS** before you add credentials. It checks authentication, database access, built dashboard assets, a dry run with zero received submissions, and one browser submission with the expected answers and PDF checksum. It saves hashes of the receipt, answer ledger, and screenshot in the private data directory and exits nonzero on failure. It exercises only this installation's synthetic form; it does not certify live ATS or provider behavior.
+
+Check persistence after a restart:
+
+```bash
+docker compose restart app
+docker compose up -d --wait --wait-timeout 120
+docker compose exec app jobpilot verify --recheck /app/.data/verification.json
+```
 
 The first build downloads Chromium and Python dependencies. PostgreSQL and applicant files live in separate persistent Docker volumes. Do not use `docker compose down -v` unless you intend to delete that data.
 
@@ -113,6 +124,7 @@ For frontend hot reload, run `npm run dev` inside `frontend`, keep the backend o
 
 ```bash
 uv run jobpilot doctor
+uv run jobpilot verify
 uv run ruff check jobpilot tests
 uv run ruff format --check jobpilot tests
 uv run pytest -q
@@ -120,7 +132,7 @@ uv run pytest -q
 
 The browser tests launch owned local fixtures. Install Chromium and build the dashboard before running all of them. An optional `CHROMIUM_PATH` selects a compatible locally installed executable. `ARTIFACT_DIR` controls where UI-test screenshots are written.
 
-The GitHub workflow installs the locked dependencies, builds the dashboard, runs the browser tests, and builds the production Docker image.
+The GitHub workflow installs the locked dependencies, builds the dashboard, runs the browser tests, starts the production Docker/PostgreSQL stack, runs `jobpilot verify`, and checks the saved evidence after restarting the app. It uploads a `deployment-evidence` artifact. The workflow also supports manual dispatch from GitHub Actions. A configured workflow is not a successful run; check its actual result before relying on it.
 
 ## Login-required employers
 

@@ -44,6 +44,14 @@ def main():
     server.add_argument("--port", type=int, default=8080)
     sub.add_parser("token", help="Print this installation's dashboard access token")
     sub.add_parser("doctor", help="Check local configuration without contacting providers")
+    verify = sub.add_parser(
+        "verify", help="Exercise the running installation with two synthetic browser runs"
+    )
+    verify.add_argument("--report", help="Write evidence manifest (default: DATA_DIR/verification.json)")
+    verify.add_argument(
+        "--recheck", help="Verify an existing manifest after restart; creates no applications"
+    )
+    verify.add_argument("--timeout", type=int, default=420, help="Total queue wait budget in seconds")
     login = sub.add_parser("login", help="Capture an employer session using your own local browser")
     login.add_argument("url")
     args = parser.parse_args()
@@ -58,6 +66,29 @@ def main():
         uvicorn.run(create_app(config), host=args.host, port=args.port, log_level="warning")
     elif args.command == "login":
         asyncio.run(capture_session(config, args.url))
+    elif args.command == "verify":
+        import sys
+
+        import httpx
+
+        from .verify import VerificationFailed, verify_deployment, write_report
+
+        if args.timeout < 1:
+            parser.error("--timeout must be positive")
+        try:
+            report = verify_deployment(config, recheck=args.recheck, timeout=args.timeout)
+            path = args.report or config.data_dir / "verification.json"
+            write_report(path, report)
+        except (VerificationFailed, httpx.HTTPError, OSError, ValueError, KeyError, TypeError) as exc:
+            # Do not print transport errors, which can contain request credentials.
+            reason = str(exc) if isinstance(exc, VerificationFailed) else type(exc).__name__
+            print(f"FAIL: {reason}", file=sys.stderr)
+            raise SystemExit(1) from None
+        print(f"PASS: {', '.join(report['checks'])}")
+        print(f"Evidence: {path}")
+        print(
+            "This verifies the owned demo. Live ATS flows and provider integrations remain separate checks."
+        )
     else:
         from pathlib import Path
 

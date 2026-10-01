@@ -25,6 +25,12 @@ Enabling auto-queue classifies only newly discovered jobs in that sweep. Jobs sk
 
 ## Readiness and results
 
+Run `docker compose exec app jobpilot verify` against a running deployment before configuring real applications. Native installations use `uv run jobpilot verify`. The command creates two synthetic runs, requires zero server receipts for the dry run and exactly one for the submission, checks every submitted demo answer and the actual PDF checksum, and saves a private evidence manifest. It does not alter your profile, resumes, pause switch, automatic-submission setting, or real application counts. Resume paused workers explicitly before this check. No MiMo or CapSolver calls are made; an already configured Telegram bot may send the usual run notifications.
+
+After restarting, run `docker compose exec app jobpilot verify --recheck /app/.data/verification.json`. This reads the same runs and compares hashes of their receipts, answer ledgers, and screenshots. It creates no new applications. Both commands exit nonzero if checks fail. The manifest contains only synthetic run IDs, timestamps, and evidence hashes, with file permissions restricted to its owner.
+
+`jobpilot doctor` checks configuration presence only. A present key is not evidence that a provider works.
+
 - **Ready:** classifier found an eligible match at or above the profile's minimum score, with a selected resume and no declared uncertainties, or the applicant explicitly approved the match.
 - **Dry run passed:** the worker verified fields and an attachment and withheld the final commit action. This is not an employer submission. Some websites may still save draft field values as you type.
 - **Needs review:** missing evidence, authentication, an unsupported control, or an incomplete final verification.
@@ -73,4 +79,4 @@ Stop the app before taking a native `.data` backup. For Docker, stop the app and
 
 This is schema version 1. New installs create tables automatically; there is no migration from the legacy CLI database. Future schema changes need an explicit migration and a tested backup/restore path. Do not downgrade a live data volume across incompatible schema changes.
 
-The workflow is configured to run SQLite/Chromium integration tests and build the Docker image. No GitHub workflow run was observed at publication, and this development environment has no Docker daemon. The PostgreSQL deployment has not been exercised here. Before sustained use, run the local demo in your deployment and verify representative real applications with your own provider credentials.
+The workflow is configured to run SQLite/Chromium integration tests, start the Docker/PostgreSQL deployment, and verify receipts and evidence persistence after an app restart. Its `deployment-evidence` artifact contains the manifest and container logs. No GitHub workflow run was observed at publication, and this development environment has no Docker daemon. PostgreSQL runtime validation is still pending until that workflow or your deployment check passes. Before sustained use, verify representative real applications with your own provider credentials.

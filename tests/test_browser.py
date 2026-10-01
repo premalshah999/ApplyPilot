@@ -246,6 +246,8 @@ def test_durable_queue_to_real_browser_receipt(server):
         detail = wait_result(c, response.json()["id"])
         assert detail["run"]["state"] == "confirmed", detail
         assert detail["run"]["receipt"]["type"] == "explicit_confirmation_page"
+        assert detail["demo_receipt"]["submissions"] == 1
+        assert detail["demo_receipt"]["resume_sha256"] == detail["run"]["receipt"]["resume_sha256"]
         assert detail["screenshot"] and all(a["verified"] for a in detail["answers"].values())
         assert detail["run"]["model_calls"] == 0
         assert detail["run"]["elapsed"] < 60
@@ -257,7 +259,39 @@ def test_durable_queue_to_real_browser_receipt(server):
         detail = wait_result(c, dry.json()["id"])
         assert detail["run"]["state"] == "dry_run_passed", detail
         assert detail["run"]["receipt"] == {}
+        assert detail["demo_receipt"]["submissions"] == 0
         assert c.get("/api/runs/" + dry.json()["id"] + "/screenshot").status_code == 200
+
+
+def test_deployment_verifier_and_evidence_integrity(server, tmp_path):
+    from jobpilot.verify import VerificationFailed, verify_deployment, write_report
+
+    url, config, service = server
+    report = verify_deployment(config, timeout=90)
+    assert report["ok"] and [r["submissions_received"] for r in report["runs"]] == [0, 1]
+    manifest = tmp_path / "verification.json"
+    write_report(manifest, report)
+    assert manifest.stat().st_mode & 0o777 == 0o600
+    assert "persisted_evidence_matches" in verify_deployment(config, recheck=manifest)["checks"]
+    # A receipt flag alone must not pass when the underlying evidence was lost.
+    screenshot = config.data_dir / "runs" / report["runs"][0]["id"] / "final.png"
+    original = screenshot.read_bytes()
+    try:
+        screenshot.write_bytes(b"not a screenshot")
+        with pytest.raises(VerificationFailed, match="Screenshot evidence"):
+            verify_deployment(config, recheck=manifest)
+    finally:
+        screenshot.write_bytes(original)
+
+    # Verification must not silently unpause production workers to make a test pass.
+    control = service.db.get_setting("control")
+    service.db.set_setting("control", {**control, "paused": True})
+    try:
+        with pytest.raises(VerificationFailed, match="paused"):
+            verify_deployment(config)
+        assert service.db.get_setting("control")["paused"]
+    finally:
+        service.db.set_setting("control", control)
 
 
 async def test_dashboard_navigation_and_mobile(server, page, tmp_path):

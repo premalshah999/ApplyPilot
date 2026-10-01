@@ -3,12 +3,15 @@ on:
   push:
     branches: [main, 'codex/**']
   pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
+    env:
+      COMPOSE_PROJECT_NAME: applypilot-ci
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -26,5 +29,30 @@ jobs:
       - run: uv run playwright install --with-deps chromium
       - run: uv run ruff check jobpilot tests && uv run ruff format --check jobpilot tests
       - run: uv run pytest -q
-      - name: Build production image
-        run: docker build -t applypilot:ci .
+      - name: Start production image with PostgreSQL
+        run: |
+          cp .env.example .env
+          docker compose up --build -d --wait --wait-timeout 180
+      - name: Verify deployed queue, browser, and receipts
+        run: docker compose exec -T app jobpilot verify --timeout 300
+      - name: Verify evidence persists across app restart
+        run: |
+          docker compose restart app
+          docker compose up -d --wait --wait-timeout 120
+          docker compose exec -T app jobpilot verify --recheck /app/.data/verification.json
+          docker compose cp app:/app/.data/verification.json verification.json
+      - name: Capture deployment logs
+        if: always()
+        run: docker compose logs --no-color > compose.log
+        continue-on-error: true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: deployment-evidence
+          path: |
+            verification.json
+            compose.log
+          retention-days: 7
+      - name: Remove CI deployment
+        if: always()
+        run: docker compose down -v
