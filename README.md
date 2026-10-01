@@ -162,6 +162,8 @@ When a worker is interrupted before submission, the run requires review. If inte
 
 See [architecture](docs/architecture.md), [operations](docs/operations.md), and [validation](docs/validation.md) for implementation and operating details.
 
+The proposed [unattended agent design](docs/unattended-agent.md) specifies richer answer decisions, searchable education dropdowns, account creation, Gmail verification, and bounded page navigation. It includes acceptance scenarios and explicitly separates proposed capabilities from the current runtime.
+
 ## Open source
 
 AGPL-3.0, retaining the repository's original license. The predecessor was [Pickle-Pixel/ApplyPilot](https://github.com/Pickle-Pixel/ApplyPilot). This Studio rewrite preserves that provenance while replacing the old runtime. Dependencies keep their own licenses; see [third-party notices](docs/third-party.md).

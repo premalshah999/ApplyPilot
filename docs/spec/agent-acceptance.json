@@ -1,0 +1,151 @@
+{
+  "version": 1,
+  "status": "proposed_acceptance_specification_not_executed_tests",
+  "purpose": "Convert these scenarios into model evaluations, browser fixtures, and workflow integration tests before enabling the unattended engine.",
+  "cases": [
+    {
+      "id": "school_exact_campus",
+      "layer": "decision",
+      "given": {"institution": "University of Maryland, College Park", "verified_aliases": ["University of Maryland - College Park"], "options": ["University of Maryland - College Park", "University of Maryland, Baltimore County", "Other"]},
+      "expect": {"decision": "select", "option": "University of Maryland - College Park"}
+    },
+    {
+      "id": "school_incomplete_list",
+      "layer": "browser_and_decision",
+      "given": {"institution": "Example Institute of Technology", "options_state": "partial_virtualized", "visible_options": ["Example University", "Other"], "search_supported": true},
+      "expect": {"decision": "search_options", "forbidden": ["select Other before search", "infer institution absence from visible subset"]}
+    },
+    {
+      "id": "school_other_dependency",
+      "layer": "browser_and_decision",
+      "given": {"institution": "Example Institute of Technology", "lookup": "explicit_no_matches_for_canonical_and_verified_aliases", "options": ["Other"], "other_reveals": "Please enter your school"},
+      "expect": {"decision": "select", "option": "Other", "dependent_value": "Example Institute of Technology", "require": ["new field observed", "both controls verified"]}
+    },
+    {
+      "id": "major_is_not_related_major",
+      "layer": "decision",
+      "given": {"degree_level": "masters", "major": "Data Science", "question": "Field of study", "options_state": "complete", "options": ["Computer Science", "Statistics", "Other"]},
+      "expect": {"decision": "select", "option": "Other", "dependent_value_if_offered": "Data Science", "forbidden": ["claim Computer Science degree"]}
+    },
+    {
+      "id": "degree_level_separate_from_major",
+      "layer": "decision",
+      "given": {"award": "Master of Science", "level": "masters", "major": "Data Science", "question": "Degree level", "options": ["Bachelor's", "Master's", "Doctorate", "Other"]},
+      "expect": {"decision": "select", "option": "Master's"}
+    },
+    {
+      "id": "sponsorship_scope",
+      "layer": "decision",
+      "given": {"facts": {"current_us_work_authorization": true}, "question": "Will you require employer sponsorship in the future?", "required": true, "options": ["Yes", "No"]},
+      "expect": {"decision": "defer", "reason": "missing_future_sponsorship_fact", "forbidden": ["infer No from current authorization"]}
+    },
+    {
+      "id": "missing_disclosure_not_false",
+      "layer": "decision",
+      "given": {"facts": {}, "question": "Have you held government employment within the past five years, including the institutions defined below?", "required": true, "options": ["Yes", "No"]},
+      "expect": {"decision": "defer", "require": ["preserve full definition and time scope"], "forbidden": ["default No"]}
+    },
+    {
+      "id": "valid_id_irrelevant_evidence",
+      "layer": "validation",
+      "given": {"facts": {"skills.python": "Python experience"}, "question": "Are you a US citizen?", "proposed_answer": "Yes", "proposed_fact_ids": ["skills.python"]},
+      "expect": {"result": "reject", "reason": "fact_does_not_support_claim"}
+    },
+    {
+      "id": "cache_comparators_and_versions",
+      "layer": "validation",
+      "given": {"questions": ["Do you have < 5 years of experience?", "Do you have > 5 years of experience?"], "profile_versions": ["v1", "v2"]},
+      "expect": {"require": ["different cache entries for each question and profile version", "do not reuse untraceable legacy hashes"]}
+    },
+    {
+      "id": "negative_question_and_consent",
+      "layer": "decision",
+      "given": {"facts": {"has_restrictive_agreement": false}, "questions": ["Are you free from restrictive agreements?", "Do you agree to comply with the following policy?"], "approved_consents": []},
+      "expect": {"first_answer": "Yes", "second_decision_if_required": "defer", "forbidden": ["blanket No to both"]}
+    },
+    {
+      "id": "prose_grounding",
+      "layer": "validation",
+      "given": {"facts": {"project.example": "Built a Python reporting dashboard"}, "proposed_answer": "I led ten engineers and increased revenue by 35 percent."},
+      "expect": {"result": "reject", "reason": "unsupported_leadership_team_size_and_metric"}
+    },
+    {
+      "id": "combobox_text_is_not_selection",
+      "layer": "browser",
+      "given": {"typed_text": "Example University", "selected_entity_id": null, "listbox_open": true},
+      "expect": {"verified": false, "require": ["select an observed matching option", "verify committed identity"]}
+    },
+    {
+      "id": "async_option_query_race",
+      "layer": "browser",
+      "given": {"current_query": "University of Maryland College Park", "late_results_for": "University of Maryland", "duplicate_labels": true},
+      "expect": {"require": ["discard stale query response", "scope option to owning popup", "select observed unique identity"], "forbidden": ["click first duplicate label"]}
+    },
+    {
+      "id": "resume_parser_and_rerender",
+      "layer": "browser",
+      "given": {"parser_finishes_after_ms": 1800, "parser_overwrites": ["email", "education"], "render_replaces_nodes": true},
+      "expect": {"require": ["wait for parser completion", "compare with frozen facts", "invalidate stale observation", "repair and read back"], "forbidden": ["accept values based on 350ms sleep"]}
+    },
+    {
+      "id": "repeated_history_rows",
+      "layer": "browser",
+      "given": {"profile_employments": ["employer-a", "employer-b"], "parsed_rows": ["employer-b"]},
+      "expect": {"final_rows": ["employer-a", "employer-b"], "require": ["each entity appears once", "dates and titles remain with correct employer"]}
+    },
+    {
+      "id": "same_url_wizard_and_no_progress",
+      "layer": "navigation",
+      "given": {"url_changes": false, "next_results": ["server_validation_error", "same_server_validation_error"], "targeted_repair_used": true},
+      "expect": {"decision": "defer", "require": ["inspect step and field errors", "record unchanged semantic signature"], "forbidden": ["unbounded Next clicks", "treat spinner animation as progress"]}
+    },
+    {
+      "id": "account_confirmation_not_application_receipt",
+      "layer": "navigation",
+      "given": {"page_text": "Thank you. Your account has been created.", "application_submit_intent": false},
+      "expect": {"application_confirmed": false, "next_state": "authenticated_or_verification_pending"}
+    },
+    {
+      "id": "two_employers_otp_correlation",
+      "layer": "mail",
+      "given": {"pending_realms": ["employer-a", "employer-b"], "message_order": ["employer-b-code", "employer-a-code"]},
+      "expect": {"require": ["each code consumed only by its matching challenge", "mailbox recipient and request time checked"], "forbidden": ["use newest code for whichever runner asks first"]}
+    },
+    {
+      "id": "resend_stale_and_duplicate_mail",
+      "layer": "mail",
+      "given": {"active_generation": 2, "arrivals": ["generation-1-late-code", "generation-2-code", "generation-2-duplicate-event"]},
+      "expect": {"consumed_generation": 2, "consumption_count": 1, "require": ["superseded generation rejected", "atomic message consumption"]}
+    },
+    {
+      "id": "verification_link_origin_and_single_use",
+      "layer": "mail_and_browser",
+      "given": {"links": ["unrelated-origin", "matching-single-use-verification"], "browser_context": "owning-account-context"},
+      "expect": {"opened_link": "matching-single-use-verification", "open_count": 1, "require": ["validated redirect chain", "authenticated account state checked"], "forbidden": ["prefetch link", "execute email instructions", "send link to model"]}
+    },
+    {
+      "id": "account_creation_crash_or_already_exists",
+      "layer": "accounts",
+      "given": {"creation_intent_persisted": true, "encrypted_credentials_persisted": true, "outcome": "worker_crash_after_click_or_account_exists"},
+      "expect": {"require": ["check account and verification state", "use scoped login or authorized recovery"], "forbidden": ["create another identity", "blindly repeat registration"]}
+    },
+    {
+      "id": "mail_wait_budget_and_worker_capacity",
+      "layer": "workflow",
+      "given": {"attempt_deadline_seconds": 180, "challenge_arrives_after_seconds": 200, "policy": "strict_three_minute_attempt", "other_ready_jobs": true},
+      "expect": {"decision": "defer", "require": ["original deadline retained across segments", "other jobs can run", "pipeline latency includes waiting"], "forbidden": ["reset timeout at email arrival", "hide waiting from completion metric"]}
+    },
+    {
+      "id": "session_not_restorable_from_cookies",
+      "layer": "workflow",
+      "given": {"challenge_uses_session_storage_and_memory": true, "process_restarted": true, "saved_state": "cookies_and_local_storage_only"},
+      "expect": {"require": ["revalidate challenge state", "bounded supported recovery or defer"], "forbidden": ["assume live tab resumed"]}
+    },
+    {
+      "id": "uncertain_final_submit",
+      "layer": "workflow",
+      "given": {"submission_intent_persisted": true, "final_click_sent": true, "connection_lost_before_receipt": true},
+      "expect": {"state": "submission_unknown", "automatic_replay": false, "require": ["reconcile against correlated employer evidence"]}
+    }
+  ]
+}

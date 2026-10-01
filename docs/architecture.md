@@ -1,5 +1,7 @@
 # Architecture
 
+This page describes the currently implemented runtime. The proposed answer, account-creation, and Gmail verification replacement is specified in [Unattended application agent](unattended-agent.md); those new capabilities are not implemented by that design document.
+
 ```mermaid
 flowchart TD
   UI["Dashboard / Telegram"] --> API["Application service"]
