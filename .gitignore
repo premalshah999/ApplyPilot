@@ -1,41 +1,29 @@
-# User data (NEVER commit)
-profile.json
-resume.txt
-resume.pdf
-*.env
+# Applicant data and credentials
+.env
 .env.*
 !.env.example
-
-# Runtime artifacts
+.data/
+data/
 *.db
-tailored_resumes/
-cover_letters/
-chrome-workers/
-apply-workers/
-apply_logs/
-logs/
-
-# MCP configs (per-machine)
-.mcp*.json
-
-# Python
+*.db-shm
+*.db-wal
+*.sqlite*
+storage-state*.json
+access-token
+application-exports/
+# Build and development files
+.venv/
 __pycache__/
 *.py[cod]
-*$py.class
+.pytest_cache/
+.ruff_cache/
 *.egg-info/
 dist/
 build/
-*.egg
-
-# IDE
-.vscode/
+frontend/node_modules/
+frontend/*.tsbuildinfo
+jobpilot/static/*
+!jobpilot/static/.gitkeep
 .idea/
-*.swp
-*.swo
-
-# OS
 .DS_Store
-Thumbs.db
-
-# Claude Code
-.claude/
+*.log

@@ -1,0 +1,41 @@
+services:
+  db:
+    image: postgres:17-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: applypilot
+      POSTGRES_USER: applypilot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-container-database}
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U applypilot -d applypilot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  app:
+    build: .
+    restart: unless-stopped
+    init: true
+    shm_size: 1gb
+    env_file: .env
+    environment:
+      DATA_DIR: /app/.data
+      DATABASE_URL: postgresql+psycopg://applypilot:${POSTGRES_PASSWORD:-local-container-database}@db:5432/applypilot
+      DBOS_DATABASE_URL: postgresql+psycopg://applypilot:${POSTGRES_PASSWORD:-local-container-database}@db:5432/applypilot
+      # Always use the Chromium version installed into this image.
+      CHROMIUM_PATH: ""
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - applicant-data:/app/.data
+    depends_on:
+      db:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+volumes:
+  postgres:
+  applicant-data:

@@ -1,29 +1,30 @@
-name: CI
-
+name: Verify application
 on:
-  workflow_dispatch:  # manual trigger only
-
+  push:
+    branches: [main, 'codex/**']
+  pull_request:
+permissions:
+  contents: read
 jobs:
   test:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.11", "3.12", "3.13"]
-
+    timeout-minutes: 20
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Install dependencies
-        run: pip install -e ".[dev]"
-
-      - name: Lint
-        run: ruff check src/
-
-      - name: Test
-        run: pytest tests/ -v
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.12.18'
+          python-version: '3.12'
+      - run: npm ci && npm run build
+        working-directory: frontend
+      - run: uv sync --frozen
+      - run: uv run playwright install --with-deps chromium
+      - run: uv run ruff check jobpilot tests && uv run ruff format --check jobpilot tests
+      - run: uv run pytest -q
+      - name: Build production image
+        run: docker build -t applypilot:ci .

@@ -1,193 +1,155 @@
-<!-- logo here -->
+# ApplyPilot Studio
 
-# ApplyPilot
+A self-hosted application workspace with a real browser worker, an evidence-backed answer engine, a fixed resume library, and a Telegram control channel.
 
-**Applied to 1,000 jobs in 2 days. Fully autonomous. Open source.**
+This replaces the previous ApplyPilot CLI. The old version is preserved on [`archive/pre-studio-2026-10-01`](https://github.com/premalshah999/ApplyPilot/tree/archive/pre-studio-2026-10-01). There is no Claude Code runtime dependency and no CV tailoring step.
 
-[![PyPI version](https://img.shields.io/pypi/v/applypilot?color=blue)](https://pypi.org/project/applypilot/)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
-[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-green.svg)](LICENSE)
-[![GitHub stars](https://img.shields.io/github/stars/Pickle-Pixel/ApplyPilot?style=social)](https://github.com/Pickle-Pixel/ApplyPilot)
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/S6S01UL5IO)
+![ApplyPilot dashboard](docs/dashboard.png)
 
+## Start with Docker
 
-
-
-https://github.com/user-attachments/assets/7ee3417f-43d4-4245-9952-35df1e77f2df
-
-
----
-
-## What It Does
-
-ApplyPilot is a 6-stage autonomous job application pipeline. It discovers jobs across 5+ boards, scores them against your resume with AI, tailors your resume per job, writes cover letters, and **submits applications for you**. It navigates forms, uploads documents, answers screening questions, all hands-free.
-
-Three commands. That's it.
+Requirements: Docker Engine with Compose; an x86-64 or ARM64 Linux host with approximately 4–8 GB available RAM for three browsers. Start with fewer workers on a small machine.
 
 ```bash
-pip install applypilot
-pip install --no-deps python-jobspy && pip install pydantic tls-client requests markdownify regex
-applypilot init          # one-time setup: resume, profile, preferences, API keys
-applypilot doctor        # verify your setup — shows what's installed and what's missing
-applypilot run           # discover > enrich > score > tailor > cover letters
-applypilot run -w 4      # same but parallel (4 threads for discovery/enrichment)
-applypilot apply         # autonomous browser-driven submission
-applypilot apply -w 3    # parallel apply (3 Chrome instances)
-applypilot apply --dry-run  # fill forms without submitting
+git clone https://github.com/premalshah999/ApplyPilot.git
+cd ApplyPilot
+cp .env.example .env
+docker compose up --build -d
+docker compose exec app jobpilot token
 ```
 
-> **Why two install commands?** `python-jobspy` pins an exact numpy version in its metadata that conflicts with pip's resolver, but works fine at runtime with any modern numpy. The `--no-deps` flag bypasses the resolver; the second command installs jobspy's actual runtime dependencies. Everything except `python-jobspy` installs normally.
+Open **http://127.0.0.1:8080**, paste the token, and choose **Run the local demo**. No provider keys are required. A real Chromium process fills a synthetic applicant's form, uploads a synthetic PDF, submits to this installation, and captures a receipt. Demo submissions never count toward real application statistics.
 
----
+The first build downloads Chromium and Python dependencies. PostgreSQL and applicant files live in separate persistent Docker volumes. Do not use `docker compose down -v` unless you intend to delete that data.
 
-## Two Paths
+## Add your integrations
 
-### Full Pipeline (recommended)
-**Requires:** Python 3.11+, Node.js (for npx), Gemini API key (free), Claude Code CLI, Chrome
+Edit `.env`, then recreate the application container:
 
-Runs all 6 stages, from job discovery to autonomous application submission. This is the full power of ApplyPilot.
-
-### Discovery + Tailoring Only
-**Requires:** Python 3.11+, Gemini API key (free)
-
-Runs stages 1-5: discovers jobs, scores them, tailors your resume, generates cover letters. You submit applications manually with the AI-prepared materials.
-
----
-
-## The Pipeline
-
-| Stage | What Happens |
-|-------|-------------|
-| **1. Discover** | Scrapes 5 job boards (Indeed, LinkedIn, Glassdoor, ZipRecruiter, Google Jobs) + 48 Workday employer portals + 30 direct career sites |
-| **2. Enrich** | Fetches full job descriptions via JSON-LD, CSS selectors, or AI-powered extraction |
-| **3. Score** | AI rates every job 1-10 based on your resume and preferences. Only high-fit jobs proceed |
-| **4. Tailor** | AI rewrites your resume per job: reorganizes, emphasizes relevant experience, adds keywords. Never fabricates |
-| **5. Cover Letter** | AI generates a targeted cover letter per job |
-| **6. Auto-Apply** | Claude Code navigates application forms, fills fields, uploads documents, answers questions, and submits |
-
-Each stage is independent. Run them all or pick what you need.
-
----
-
-## ApplyPilot vs The Alternatives
-
-| Feature | ApplyPilot | AIHawk | Manual |
-|---------|-----------|--------|--------|
-| Job discovery | 5 boards + Workday + direct sites | LinkedIn only | One board at a time |
-| AI scoring | 1-10 fit score per job | Basic filtering | Your gut feeling |
-| Resume tailoring | Per-job AI rewrite | Template-based | Hours per application |
-| Auto-apply | Full form navigation + submission | LinkedIn Easy Apply only | Click, type, repeat |
-| Supported sites | Indeed, LinkedIn, Glassdoor, ZipRecruiter, Google Jobs, 46 Workday portals, 28 direct sites | LinkedIn | Whatever you open |
-| License | AGPL-3.0 | MIT | N/A |
-
----
-
-## Requirements
-
-| Component | Required For | Details |
-|-----------|-------------|---------|
-| Python 3.11+ | Everything | Core runtime |
-| Node.js 18+ | Auto-apply | Needed for `npx` to run Playwright MCP server |
-| Gemini API key | Scoring, tailoring, cover letters | Free tier (15 RPM / 1M tokens/day) is enough |
-| Chrome/Chromium | Auto-apply | Auto-detected on most systems |
-| Claude Code CLI | Auto-apply | Install from [claude.ai/code](https://claude.ai/code) |
-
-**Gemini API key is free.** Get one at [aistudio.google.com](https://aistudio.google.com). OpenAI and local models (Ollama/llama.cpp) are also supported.
-
-### Optional
-
-| Component | What It Does |
-|-----------|-------------|
-| CapSolver API key | Solves CAPTCHAs during auto-apply (hCaptcha, reCAPTCHA, Turnstile, FunCaptcha). Without it, CAPTCHA-blocked applications just fail gracefully |
-
-> **Note:** python-jobspy is installed separately with `--no-deps` because it pins an exact numpy version in its metadata that conflicts with pip's resolver. It works fine with modern numpy at runtime.
-
----
-
-## Configuration
-
-All generated by `applypilot init`:
-
-### `profile.json`
-Your personal data in one structured file: contact info, work authorization, compensation, experience, skills, resume facts (preserved during tailoring), and EEO defaults. Powers scoring, tailoring, and form auto-fill.
-
-### `searches.yaml`
-Job search queries, target titles, locations, boards. Run multiple searches with different parameters.
-
-### `.env`
-API keys and runtime config: `GEMINI_API_KEY`, `LLM_MODEL`, `CAPSOLVER_API_KEY` (optional).
-
-### Package configs (shipped with ApplyPilot)
-- `config/employers.yaml` - Workday employer registry (48 preconfigured)
-- `config/sites.yaml` - Direct career sites (30+), blocked sites, base URLs, manual ATS domains
-- `config/searches.example.yaml` - Example search configuration
-
----
-
-## How Stages Work
-
-### Discover
-Queries Indeed, LinkedIn, Glassdoor, ZipRecruiter, Google Jobs via JobSpy. Scrapes 48 Workday employer portals (configurable in `employers.yaml`). Hits 30 direct career sites with custom extractors. Deduplicates by URL.
-
-### Enrich
-Visits each job URL and extracts the full description. 3-tier cascade: JSON-LD structured data, then CSS selector patterns, then AI-powered extraction for unknown layouts.
-
-### Score
-AI scores every job 1-10 against your profile. 9-10 = strong match, 7-8 = good, 5-6 = moderate, 1-4 = skip. Only jobs above your threshold proceed to tailoring.
-
-### Tailor
-Generates a custom resume per job: reorders experience, emphasizes relevant skills, incorporates keywords from the job description. Your `resume_facts` (companies, projects, metrics) are preserved exactly. The AI reorganizes but never fabricates.
-
-### Cover Letter
-Writes a targeted cover letter per job referencing the specific company, role, and how your experience maps to their requirements.
-
-### Auto-Apply
-Claude Code launches a Chrome instance, navigates to each application page, detects the form type, fills personal information and work history, uploads the tailored resume and cover letter, answers screening questions with AI, and submits. A live dashboard shows progress in real-time.
-
-The Playwright MCP server is configured automatically at runtime per worker. No manual MCP setup needed.
+```dotenv
+MIMO_API_KEY=your-key
+MIMO_BASE_URL=https://api.xiaomimimo.com/v1
+MIMO_MODEL=mimo-v2.6-pro
+TELEGRAM_BOT_TOKEN=your-bot-token
+TELEGRAM_USER_ID=your-numeric-telegram-user-id
+CAPSOLVER_API_KEY=your-key
+```
 
 ```bash
-# Utility modes (no Chrome/Claude needed)
-applypilot apply --mark-applied URL    # manually mark a job as applied
-applypilot apply --mark-failed URL     # manually mark a job as failed
-applypilot apply --reset-failed        # reset all failed jobs for retry
-applypilot apply --gen --url URL       # generate prompt file for manual debugging
+docker compose up -d --force-recreate app
 ```
 
----
+Keys remain on the server; the dashboard only receives connection flags. Telegram and CapSolver are optional. MiMo is needed for classification, evidence-based prose answers, and browser navigation on real applications. Use the actual pricing of your provider in `MIMO_INPUT_PRICE` and `MIMO_OUTPUT_PRICE`; the displayed cost is an estimate, not an invoice.
 
-## CLI Reference
+Then:
 
+1. Save your identity, first/last-name facts, eligibility facts, preferences, and experience evidence in **Knowledge base**.
+2. Upload your 8–10 prepared, text-based PDF resumes in **Resumes**, with role tags.
+3. Paste a job URL in **Applications** or connect a company board in **Sources**.
+4. Classify the role. Inspect the match and chosen resume. Missing eligibility evidence requires review; you can manually approve a match with an explanation.
+5. Run a **Dry run** on a representative employer. Read the answer ledger and screenshot.
+6. Enable **Automatic submission** in Settings when you are ready. Apply to approved jobs, or enable classification and auto-queue on each source.
+
+Required answers without adequate evidence go to the review inbox. After resolving them, approve and requeue the job. The next run freezes a new profile snapshot containing the approved answers.
+
+## What is implemented
+
+| Area | Behavior |
+| --- | --- |
+| Dashboard | Overview, job imports, classification, match approval, queue, receipts, screenshots, review inbox, resume uploads, profile facts, source schedules, controls |
+| Browser | Real Chromium, observed-control IDs, frame inspection, native controls, radio groups, ARIA comboboxes, file uploads, read-back verification, bounded navigation with Browser Use |
+| Fast path | Single-page forms on Greenhouse, Lever, Ashby, SmartRecruiters, Workable, and BambooHR can fill directly before invoking the navigation model |
+| Answers | Exact approved answers → identity facts → demographic decline → MiMo with evidence IDs; required unresolved answers stop for review |
+| Resumes | Select one existing PDF, freeze its checksum, verify attachment, retain a checksum in the receipt; never rewrite a CV |
+| Scheduling | Five-field cron per source, durable DBOS queues, three concurrent browsers by default, one application at a time per employer host |
+| Duplicate protection | Canonical job identity, atomic active-run checks, duplicate-delivery guards, uncertain-submission reconciliation, no blind resubmission |
+| Budgets | 100 submission reservations/day, 180-second active attempt budget, 18 model calls/run, $5 estimated model budget/day by default |
+| Telegram | `/status`, `/queue`, `/report`, `/pause`, `/resume`, `/apply URL`, `/answer REVIEW_ID ANSWER`, inline option reviews; numeric sender allowlist |
+| CapSolver | Optional, one supported reCAPTCHA v2 or Turnstile attempt/run; unsupported or unsuccessful challenges go to review |
+| Employer login | Local headed session capture or Playwright storage-state import; no invented accounts, passwords, or OTP answers |
+
+## ATS coverage — read this before scaling
+
+The system detects these ATS families and supplies navigation guidance to the same verified form engine. **Detection and guidance are implemented; they are not a claim that every employer-specific flow has been validated.**
+
+| ATS | Discovery | Application handling | Common review boundary |
+| --- | --- | --- | --- |
+| Greenhouse | Public board API | Browser + single-page fast path, frames, custom fields | Captcha, unusual controls |
+| Lever | Public postings API | Browser + single-page fast path | Custom screening fields |
+| Ashby | Public job-board API | Browser + single-page fast path, dependent questions | Custom widgets |
+| SmartRecruiters | Public postings API | Hosted applicant page + fast path | Extra screening or account requirements |
+| Workday | Public CXS listing requests for conventional tenant/site URLs | Browser with imported employer session, multipage guidance | Login, OTP, repeated experience forms, nonstandard tenants |
+| Oracle Recruiting | Import job URL or crawl public career-page links | Browser with Oracle HCM guidance | Email verification, account/profile steps |
+| iCIMS | Import job URL or crawl public career-page links | Browser with frame and profile guidance | Employer login, unusual embedded forms |
+| Taleo | Import URL / public links | Browser with multipage guidance | Login and legacy controls |
+| Workable / BambooHR | Import URL / public links | Browser + single-page fast path | Employer-specific controls |
+| Other sites | Import URL / public links | Observed-control browser fallback | Unsupported widgets or authentication |
+
+Public job-listing APIs are used for discovery, not unauthenticated employer submission APIs. Career-page discovery extracts links from returned HTML; it does not crawl an entire JavaScript site. Sources cap each sweep at 500 jobs, with at most 100 new jobs classified when auto-queue is enabled.
+
+**80–100 high-quality applications/day and sub-minute completion are operating targets, not guarantees.** The queue enforces the configured limits. Actual throughput depends on eligible jobs, model latency, employer forms, authentication, and review rate. A run that exceeds its budget stops; it does not silently keep spending. Cleanup and queue wait are separate from the active attempt budget. Manual requeues are new attempts.
+
+No real employer submissions were made during development. The local demo and browser tests are synthetic. MiMo inference, Telegram delivery, CapSolver billing, and live ATS behavior must be checked with your accounts.
+
+## Native development / VS Code / Codex
+
+Requirements: Python 3.12 or 3.13, [uv](https://docs.astral.sh/uv/), Node 22.12+ or 24+, and Chromium system dependencies. Use Linux, macOS, or WSL2.
+
+```bash
+cp .env.example .env
+uv sync --frozen
+uv run playwright install --with-deps chromium
+cd frontend
+npm ci
+npm run build
+cd ..
+uv run jobpilot token
+uv run jobpilot serve
 ```
-applypilot init                         # First-time setup wizard
-applypilot doctor                       # Verify setup, diagnose missing requirements
-applypilot run [stages...]              # Run pipeline stages (or 'all')
-applypilot run --workers 4              # Parallel discovery/enrichment
-applypilot run --stream                 # Concurrent stages (streaming mode)
-applypilot run --min-score 8            # Override score threshold
-applypilot run --dry-run                # Preview without executing
-applypilot run --validation lenient     # Relax validation (recommended for Gemini free tier)
-applypilot run --validation strict      # Strictest validation (retries on any banned word)
-applypilot apply                        # Launch auto-apply
-applypilot apply --workers 3            # Parallel browser workers
-applypilot apply --dry-run              # Fill forms without submitting
-applypilot apply --continuous           # Run forever, polling for new jobs
-applypilot apply --headless             # Headless browser mode
-applypilot apply --url URL              # Apply to a specific job
-applypilot status                       # Pipeline statistics
-applypilot dashboard                    # Open HTML results dashboard
+
+Native development defaults to two SQLite databases under `.data`. Docker uses PostgreSQL for both the application tables and DBOS's separate schema. Run **one application server process**; it owns the configured concurrent browser workers. Do not add Uvicorn workers or scale the app container horizontally with this version's startup-recovery logic.
+
+For frontend hot reload, run `npm run dev` inside `frontend`, keep the backend on port 8080, and set `BASE_URL=http://127.0.0.1:5173` before starting the backend. The Vite proxy forwards API requests; origin checks require the configured URL.
+
+```bash
+uv run jobpilot doctor
+uv run ruff check jobpilot tests
+uv run ruff format --check jobpilot tests
+uv run pytest -q
 ```
 
----
+The browser tests launch owned local fixtures. Install Chromium and build the dashboard before running all of them. An optional `CHROMIUM_PATH` selects a compatible locally installed executable. `ARTIFACT_DIR` controls where UI-test screenshots are written.
 
-## Contributing
+The GitHub workflow installs the locked dependencies, builds the dashboard, runs the browser tests, and builds the production Docker image.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, coding standards, and PR guidelines.
+## Login-required employers
 
----
+On a machine with a visible display:
 
-## License
+```bash
+uv run jobpilot login 'https://employer.wd5.myworkdayjobs.com/en-US/Careers'
+```
 
-ApplyPilot is licensed under the [GNU Affero General Public License v3.0](LICENSE).
+Sign in yourself, navigate to the application, then press Enter in the terminal. Studio stores only that employer's cookies and local storage in `.data/sessions`. For Docker, upload the generated `.json` file and the same employer URL under **Settings → Employer sessions**. Sessions are credentials: keep them private. Expired cookies, MFA, cross-domain authentication, and employer-specific verification can still require another capture.
 
-You are free to use, modify, and distribute this software. If you deploy a modified version as a service, you must release your source code under the same license.
+## Answer policy
+
+Demographic fields select a listed decline option when available. Missing decline options on required fields go to review.
+
+Disclosure facts and consent commitments are different. Supply accurate facts for convictions, government employment, NDA restrictions, referrals, sponsorship, and work authorization. The engine does not convert all such questions to “No”: negation, time scope, public-university employment, and promises to follow anti-corruption policies can change the answer. Approve exact consent labels or resolve the question in the review inbox.
+
+Question reuse is scoped to the employer, normalized label, section, and exact option set. Model-generated answers must cite known fact/evidence IDs and choose a valid option. This prevents unsupported IDs and many guessing failures; it does not mathematically prove a model's interpretation. Audit representative answers before increasing volume.
+
+## Data and recovery
+
+The application binds to loopback by default. Access requires a token; browser sessions use HttpOnly, SameSite cookies. For a remote installation, use an HTTPS reverse proxy, set the exact `BASE_URL`, and set `SECURE_COOKIES=true`. Keep the database port and CDP ports private.
+
+Resumes, browser sessions, profile snapshots, screenshots, answer ledgers, and workflow data are private runtime data, excluded from Git. On a native install, back up `.data`; with Docker, back up both named volumes while the app is stopped. The **Remove** resume action removes it from the selectable library; immutable bytes are retained for historical runs. There is no automatic data-retention deletion.
+
+When a worker is interrupted before submission, the run requires review. If interrupted during the commit step, it becomes **submission unknown**. Check the employer portal or confirmation email, open its run details, and reconcile the result before another attempt is permitted. Exactly-once effects cannot be guaranteed across an external website and a local database; the app favors holding an uncertain result over creating a duplicate.
+
+See [architecture](docs/architecture.md), [operations](docs/operations.md), and [validation](docs/validation.md) for implementation and operating details.
+
+## Open source
+
+AGPL-3.0, retaining the repository's original license. The predecessor was [Pickle-Pixel/ApplyPilot](https://github.com/Pickle-Pixel/ApplyPilot). This Studio rewrite preserves that provenance while replacing the old runtime. Dependencies keep their own licenses; see [third-party notices](docs/third-party.md).
