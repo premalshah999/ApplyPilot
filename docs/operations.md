@@ -73,4 +73,4 @@ Stop the app before taking a native `.data` backup. For Docker, stop the app and
 
 This is schema version 1. New installs create tables automatically; there is no migration from the legacy CLI database. Future schema changes need an explicit migration and a tested backup/restore path. Do not downgrade a live data volume across incompatible schema changes.
 
-Production PostgreSQL and Docker image verification run in CI; the development environment used for the initial delivery has no Docker daemon. SQLite/Chromium integration tests are the local validation baseline. Before sustained use, run the local demo in your deployment and verify representative real applications with your own provider credentials.
+The workflow is configured to run SQLite/Chromium integration tests and build the Docker image. No GitHub workflow run was observed at publication, and this development environment has no Docker daemon. The PostgreSQL deployment has not been exercised here. Before sustained use, run the local demo in your deployment and verify representative real applications with your own provider credentials.

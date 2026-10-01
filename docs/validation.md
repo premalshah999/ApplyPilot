@@ -11,7 +11,8 @@ Initial delivery, 2026-10-01 UTC.
 | Frontend dependency audit | Zero known advisories reported by `npm audit` at validation time |
 | Compose and GitHub workflow YAML | Parsed successfully |
 | Python wheel build | Passed |
-| Docker image / PostgreSQL deployment | Not executed locally: no Docker daemon; included in CI |
+| Docker image | Build configured in CI; no workflow run observed at publication; not built locally |
+| PostgreSQL deployment | Not executed locally: no Docker daemon; runtime validation remains pending |
 
 The suite covers:
 
