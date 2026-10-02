@@ -80,3 +80,9 @@ Stop the app before taking a native `.data` backup. For Docker, stop the app and
 This is schema version 1. New installs create tables automatically; there is no migration from the legacy CLI database. Future schema changes need an explicit migration and a tested backup/restore path. Do not downgrade a live data volume across incompatible schema changes.
 
 The workflow is configured to run SQLite/Chromium integration tests, start the Docker/PostgreSQL deployment, and verify receipts and evidence persistence after an app restart. Its `deployment-evidence` artifact contains the manifest and container logs. No GitHub workflow run was observed at publication, and this development environment has no Docker daemon. PostgreSQL runtime validation is still pending until that workflow or your deployment check passes. Before sustained use, verify representative real applications with your own provider credentials.
+
+## Email connections and MCP
+
+See [email verification](email-verification.md) for Google OAuth setup, trusted employer rules, diagnostics, and key backup. Back up the generated `DATA_DIR/mail-key` securely alongside the database, or supply a separately managed `MAIL_ENCRYPTION_KEY`. Existing database tables are unchanged; the email feature adds mailbox, rule, challenge, message-consumption, and OAuth-state tables on startup.
+
+The [MCP server](mcp.md) runs locally over stdio and reads from the existing authenticated API. It does not need a second provider key or a public listener.

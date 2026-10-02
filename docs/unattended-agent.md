@@ -1,6 +1,6 @@
 # Unattended application agent: implementation design
 
-Status: **proposed replacement for the answer/navigation path**, 2026-10-01. The baseline inspected was commit `6fa319e`. This document does not mean the new capabilities are implemented or live-tested. In particular, the current runtime still stops at account creation and email challenges.
+Status: **proposed replacement for the answer/navigation path**, 2026-10-01. The baseline inspected was commit `6fa319e`. This document does not mean the new capabilities are implemented or live-tested. Update: app-owned Gmail OAuth and dedicated email OTP/link handling have now been implemented; see [current email workflow and limitations](email-verification.md). Account/password creation, tenant credential storage, parked authentication pools, and the broader decision-agent replacement remain proposed.
 
 The product goal is to submit accurate, relevant applications with a selected existing resume, without asking the applicant to supervise each field. MiMo v2.6 Pro makes semantic decisions; browser drivers perform bounded actions; an account service handles login; a mailbox service resolves challenges. A missing fact defers that job and lets other jobs continue. It must never become an invented answer merely to achieve a completion count.
 
@@ -15,7 +15,7 @@ The product goal is to submit accurate, relevant applications with a selected ex
 | Answer-key normalization removes punctuation | Different comparisons such as `< 5` and `> 5` can collide | Cache version 2 preserves semantic punctuation, question definitions, scope, and data versions |
 | Citing an existing fact ID passes the evidence check | An unrelated true fact can still support a false answer | Validate the actual claim/value against relevant typed facts and derivations |
 | Upload waits 350 ms; navigation waits 250 ms | An ATS can still be parsing, saving, or rendering when inspection starts | Wait on the expected application state, loading indicators, errors, and relevant responses |
-| Password and OTP-like labels become a session review | Unattended account workflows do not exist | Separate account/challenge service and explicit authentication states |
+| Password fields still become a session review; dedicated email challenges now have a bounded handler | General unattended account workflows do not exist | Separate account service and employer adapters beyond the implemented mailbox/challenge service |
 | Browser contexts restore cookies/local storage on the exact host | Other legitimate login origins and some storage mechanisms are unsupported | Validated account realms, scoped storage, and tested restoration per adapter |
 | MiMo thinking behavior is left to the provider default | The documented default enables thinking; latency and JSON truncation become risks | Explicit per-request thinking mode and bounded output size |
 | Retry guidance is primarily in the navigation prompt | Repeating an unchanged state can waste the attempt budget | Enforce progress signatures and repair limits in application code |

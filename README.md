@@ -77,7 +77,9 @@ Required answers without adequate evidence go to the review inbox. After resolvi
 | Budgets | 100 submission reservations/day, 180-second active attempt budget, 18 model calls/run, $5 estimated model budget/day by default |
 | Telegram | `/status`, `/queue`, `/report`, `/pause`, `/resume`, `/apply URL`, `/answer REVIEW_ID ANSWER`, inline option reviews; numeric sender allowlist |
 | CapSolver | Optional, one supported reCAPTCHA v2 or Turnstile attempt/run; unsupported or unsuccessful challenges go to review |
-| Employer login | Local headed session capture or Playwright storage-state import; no invented accounts, passwords, or OTP answers |
+| Employer login | Local headed session capture or Playwright storage-state import for password/account flows |
+| Email verification | App-owned Gmail OAuth, encrypted tokens, employer rules, automatic dedicated email codes/links, redacted history ([setup](docs/email-verification.md)) |
+| MCP | Read-only stdio server for application/run/email status from coding assistants ([setup](docs/mcp.md)) |
 
 ## ATS coverage — read this before scaling
 
@@ -89,8 +91,8 @@ The system detects these ATS families and supplies navigation guidance to the sa
 | Lever | Public postings API | Browser + single-page fast path | Custom screening fields |
 | Ashby | Public job-board API | Browser + single-page fast path, dependent questions | Custom widgets |
 | SmartRecruiters | Public postings API | Hosted applicant page + fast path | Extra screening or account requirements |
-| Workday | Public CXS listing requests for conventional tenant/site URLs | Browser with imported employer session, multipage guidance | Login, OTP, repeated experience forms, nonstandard tenants |
-| Oracle Recruiting | Import job URL or crawl public career-page links | Browser with Oracle HCM guidance | Email verification, account/profile steps |
+| Workday | Public CXS listing requests for conventional tenant/site URLs | Browser with imported employer session, multipage guidance | Password/account flows, employer-specific email templates, repeated experience forms, nonstandard tenants |
+| Oracle Recruiting | Import job URL or crawl public career-page links | Browser with Oracle HCM guidance | Employer-specific email flows, account/profile steps |
 | iCIMS | Import job URL or crawl public career-page links | Browser with frame and profile guidance | Employer login, unusual embedded forms |
 | Taleo | Import URL / public links | Browser with multipage guidance | Login and legacy controls |
 | Workable / BambooHR | Import URL / public links | Browser + single-page fast path | Employer-specific controls |
@@ -144,6 +146,8 @@ uv run jobpilot login 'https://employer.wd5.myworkdayjobs.com/en-US/Careers'
 
 Sign in yourself, navigate to the application, then press Enter in the terminal. Studio stores only that employer's cookies and local storage in `.data/sessions`. For Docker, upload the generated `.json` file and the same employer URL under **Settings → Employer sessions**. Sessions are credentials: keep them private. Expired cookies, MFA, cross-domain authentication, and employer-specific verification can still require another capture.
 
+For email OTPs and verification links, configure **Settings → Email verification** using the [Gmail setup guide](docs/email-verification.md). This requires Google OAuth credentials in addition to the other provider keys. Automatic password/account creation and SMS verification remain unsupported.
+
 ## Answer policy
 
 Demographic fields select a listed decline option when available. Missing decline options on required fields go to review.
@@ -162,7 +166,7 @@ When a worker is interrupted before submission, the run requires review. If inte
 
 See [architecture](docs/architecture.md), [operations](docs/operations.md), and [validation](docs/validation.md) for implementation and operating details.
 
-The proposed [unattended agent design](docs/unattended-agent.md) specifies richer answer decisions, searchable education dropdowns, account creation, Gmail verification, and bounded page navigation. It includes acceptance scenarios and explicitly separates proposed capabilities from the current runtime.
+Gmail connection and dedicated email OTP/link verification are now implemented: see [email setup](docs/email-verification.md). The [MCP server](docs/mcp.md) provides read-only status tools for your coding assistant. The broader [unattended agent design](docs/unattended-agent.md) remains a proposal for richer answer decisions, account creation, education widgets, and resumable authentication; its acceptance scenarios are not claims of passing live ATS tests.
 
 ## Open source
 

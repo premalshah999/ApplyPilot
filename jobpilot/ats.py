@@ -38,21 +38,21 @@ REGISTRY = [
         ("myworkdayjobs.com", "myworkdaysite.com"),
         "Choose Apply Manually or Use My Last Application if available. Reconcile resume parsing. "
         "Navigate My Information, My Experience, Application Questions, Disclosures, Review. "
-        "If sign-in or OTP is needed, request session setup; do not invent credentials.",
+        "Use verify_email for dedicated email-code/link steps. Request session setup for passwords, SMS or passkeys; do not invent credentials.",
     ),
     ATS(
         "oracle",
         "Oracle Recruiting",
         ("oraclecloud.com",),
         "Oracle HCM candidate experience often has contact/verification and multipage profile questions. "
-        "Use the actual job details/application URL. Request review if email verification is required.",
+        "Use the actual job details/application URL. Use verify_email for dedicated email-code/link steps; unsupported account/profile flows require review.",
     ),
     ATS(
         "icims",
         "iCIMS",
         ("icims.com",),
         "Inspect embedded frames. Profile login, separate EEO and screening sections may appear. "
-        "Request session setup when authentication is required.",
+        "Use verify_email for dedicated email-code/link steps. Request session setup for password or unsupported authentication.",
     ),
     ATS(
         "smartrecruiters",

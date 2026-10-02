@@ -5,6 +5,7 @@ The repository keeps AGPL-3.0 licensing and attribution to its predecessor, [Pic
 Runtime and build dependencies retain their respective licenses. Exact dependency versions and hashes are recorded in `uv.lock` and `frontend/package-lock.json`.
 
 - Browser Use, FastAPI, PydanticAI, SQLAlchemy, React, Vite, and many utility libraries are independently maintained open-source projects.
+- The official MCP Python SDK provides protocol transport; cryptography provides authenticated encryption. Their installed distributions retain their license notices.
 - DBOS, Playwright, and their dependencies include their own license notices in installed distributions.
 - DM Sans and Manrope fonts are self-hosted via Fontsource packages under SIL Open Font License 1.1. Their package distributions include the full license texts.
 - Lucide icons retain the Lucide/Feather license notices included in the package.

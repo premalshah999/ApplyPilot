@@ -52,6 +52,7 @@ SCAN = r"""() => {
       || (group && group.some(x=>x.required));
     fields.push({id:id(el),label:question.replace(/\s+/g,' ').replace(/\s*\*\s*$/,'').trim(),type,
       required:!!req, options, value, section:section(el), maxlength:el.maxLength || -1,
+      autocomplete:el.autocomplete || '',
       valid: el.validity ? el.validity.valid : true});
   }
   const buttons = [...document.querySelectorAll('button,a,[role=button],input[type=submit]')]
@@ -239,20 +240,34 @@ class FormSession:
             "pending": self.pending,
         }
 
-    async def click(self, control_id):
+    async def click(self, control_id, auth_control=False):
         await self.scan()
         button = self.buttons.get(control_id)
         if not button:
             raise ValueError("Control is stale; inspect again")
-        if FINAL.search(button["label"]):
+        if FINAL.search(button["label"]) and not auth_control:
             raise ValueError("Use submit_application for final submission")
         # Never let a generic navigation action activate a bare HTML submit control.
-        if button["type"] == "submit" and not re.search(
-            r"next|continue|save|review|sign in|log in", button["label"], re.IGNORECASE
+        if (
+            not auth_control
+            and button["type"] == "submit"
+            and not re.search(r"next|continue|save|review|sign in|log in", button["label"], re.IGNORECASE)
         ):
             raise ValueError("This may submit the application; use submit_application")
         pages = set(self.page.context.pages)
-        await self.locator(control_id).click(timeout=8000)
+        el = self.locator(control_id)
+        if auth_control:
+            el = await el.element_handle()
+        if auth_control:
+            await el.evaluate("el => el.dataset.jpAuthControl='true'")
+        try:
+            await el.click(timeout=8000)
+        finally:
+            if auth_control:
+                try:
+                    await el.evaluate("el => delete el.dataset.jpAuthControl")
+                except Exception:
+                    pass
         await self.page.wait_for_timeout(250)
         opened = [p for p in self.page.context.pages if p not in pages]
         if opened:

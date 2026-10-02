@@ -44,6 +44,7 @@ def main():
     server.add_argument("--port", type=int, default=8080)
     sub.add_parser("token", help="Print this installation's dashboard access token")
     sub.add_parser("doctor", help="Check local configuration without contacting providers")
+    sub.add_parser("mcp", help="Serve read-only application tools over MCP stdio")
     verify = sub.add_parser(
         "verify", help="Exercise the running installation with two synthetic browser runs"
     )
@@ -58,6 +59,10 @@ def main():
     config = settings()
     if args.command == "token":
         print(config.app_token)
+    elif args.command == "mcp":
+        from .mcp_server import create_server
+
+        create_server(config).run(transport="stdio")
     elif args.command == "serve":
         import uvicorn
 
@@ -101,6 +106,7 @@ def main():
             ("MiMo", bool(config.mimo_api_key)),
             ("Telegram", bool(config.telegram_bot_token and config.telegram_user_id)),
             ("CapSolver (optional)", bool(config.capsolver_api_key)),
+            ("Gmail OAuth (optional)", bool(config.google_client_id and config.google_client_secret)),
         ]:
             print(f"{'READY' if ready else 'MISSING':7} {label}")
         print(

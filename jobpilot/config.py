@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_user_id: str = ""
     capsolver_api_key: str = ""
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    mail_encryption_key: str = ""
+    mail_poll_seconds: float = Field(default=3, ge=0.1, le=60)
+    mail_wait_seconds: int = Field(default=60, ge=5, le=120)
     workers: int = Field(default=3, ge=1, le=8)
     application_timeout: int = Field(default=180, ge=30, le=180)
     daily_application_limit: int = Field(default=100, ge=1, le=200)

@@ -311,6 +311,14 @@ async def test_dashboard_navigation_and_mobile(server, page, tmp_path):
     for name in ["Applications", "Review inbox", "Resumes", "Knowledge base", "Sources", "Settings"]:
         await page.locator("nav").get_by_role("button", name=name, exact=True).click()
         await page.get_by_role("heading", name=name, exact=True).wait_for()
+    await page.get_by_role("heading", name="Email verification", exact=True).wait_for()
+    assert await page.get_by_role("button", name="Connect Gmail", exact=True).is_disabled()
+    await page.screenshot(path=str(target / "settings-email-desktop.png"), full_page=True)
+    await page.set_viewport_size({"width": 390, "height": 844})
+    assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth"), (
+        "Email settings overflow"
+    )
+    await page.screenshot(path=str(target / "settings-email-mobile.png"), full_page=True)
     await page.locator("nav").get_by_role("button", name="Overview", exact=True).click()
     await page.set_viewport_size({"width": 390, "height": 844})
     await page.screenshot(path=str(target / "dashboard-mobile.png"), full_page=True)

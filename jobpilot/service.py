@@ -22,6 +22,9 @@ class Service:
     def __init__(self, db, config):
         self.db, self.config = db, config
         self.dispatch = None
+        from .mail import MailService
+
+        self.mail = MailService(db, config)
 
     async def queue(self, job_id, mode="dry_run", resume_id=None):
         profile = Profile.model_validate(self.db.get_setting("profile", {}))

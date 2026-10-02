@@ -71,7 +71,10 @@ def create_app(config: Settings | None = None):
             from .telegram import poll
 
             bot = asyncio.create_task(poll(service))
+        mail_task = asyncio.create_task(service.mail.poll())
         yield
+        mail_task.cancel()
+        await asyncio.gather(mail_task, return_exceptions=True)
         if bot:
             bot.cancel()
             await asyncio.gather(bot, return_exceptions=True)
@@ -94,6 +97,9 @@ def create_app(config: Settings | None = None):
         openapi_url=None,
     )
     app.state.service = service
+    from .mail_api import install_routes
+
+    install_routes(app, service)
 
     @app.middleware("http")
     async def security(request: Request, call_next):

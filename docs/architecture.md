@@ -1,6 +1,6 @@
 # Architecture
 
-This page describes the currently implemented runtime. The proposed answer, account-creation, and Gmail verification replacement is specified in [Unattended application agent](unattended-agent.md); those new capabilities are not implemented by that design document.
+This page describes the implemented runtime. Gmail connections and dedicated email-code/link verification are implemented in [the email workflow](email-verification.md). The broader answer and account-creation replacement remains proposed in [Unattended application agent](unattended-agent.md).
 
 ```mermaid
 flowchart TD
@@ -82,7 +82,9 @@ Job text and website text are untrusted data. Model prompts delimit their role; 
 
 Server-side URL fetches reject local/private IP destinations and check redirects. Browser requests reject private destinations except the owned demo. Guards cover observed final controls and known final endpoint patterns; unknown sites may autosave personal data during a dry run. Use OS/container egress isolation on an untrusted network. DNS validation does not replace an outbound firewall and is not a complete DNS-rebinding defense.
 
-No account creation, email inbox scraping, OTP harvesting, stealth fingerprinting, or arbitrary remote code execution is implemented. Authentication and unsupported flows become review items.
+App-owned Gmail OAuth and dedicated email verification use `mail.py`, `mail_api.py`, and `email_browser.py`: encrypted refresh tokens, bounded pending challenges, exact sender/recipient/time checks, one-use consumption, and a Chromium redirect guard. Email wait time counts toward the application deadline and holds its worker slot. See [email setup and limitations](email-verification.md).
+
+The [read-only MCP server](mcp.md) calls fixed authenticated API endpoints and exposes no verification secrets or mutation tools. Password/account creation, SMS/passkeys, unrestricted inbox access, stealth fingerprinting, and arbitrary remote code execution remain unsupported. Those flows become review items.
 
 ## Primary references
 

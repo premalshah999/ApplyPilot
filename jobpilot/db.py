@@ -2,7 +2,18 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from sqlalchemy import JSON, Boolean, Float, Integer, String, Text, create_engine, event, select
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    Float,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    create_engine,
+    event,
+    select,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 
@@ -114,6 +125,60 @@ class Budget(Base):
     day: Mapped[str] = mapped_column(String, primary_key=True)
     spent: Mapped[float] = mapped_column(Float, default=0)
     submissions: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class Mailbox(Base):
+    __tablename__ = "mailboxes"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    email: Mapped[str] = mapped_column(String, unique=True)
+    credentials: Mapped[str] = mapped_column(Text)
+    state: Mapped[str] = mapped_column(String, default="connected")
+    error: Mapped[str] = mapped_column(String, default="")
+    checked_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[str] = mapped_column(String, default=now)
+
+
+class MailRule(Base):
+    __tablename__ = "mail_rules"
+    __table_args__ = (UniqueConstraint("employer_origin", "employer_path"),)
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    mailbox_id: Mapped[str] = mapped_column(String)
+    employer_origin: Mapped[str] = mapped_column(String)
+    employer_path: Mapped[str] = mapped_column(String, default="/")
+    sender_domains: Mapped[list] = mapped_column(JSON)
+    link_origins: Mapped[list] = mapped_column(JSON)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class MailChallenge(Base):
+    __tablename__ = "mail_challenges"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    run_id: Mapped[str] = mapped_column(String, index=True)
+    rule_id: Mapped[str] = mapped_column(String)
+    mailbox_id: Mapped[str] = mapped_column(String)
+    recipient: Mapped[str] = mapped_column(String)
+    kind: Mapped[str] = mapped_column(String)
+    state: Mapped[str] = mapped_column(String, default="pending", index=True)
+    since: Mapped[float] = mapped_column(Float)
+    expires: Mapped[float] = mapped_column(Float)
+    payload: Mapped[str] = mapped_column(Text, default="")
+    message_id: Mapped[str] = mapped_column(String, default="")
+    reason: Mapped[str] = mapped_column(String, default="")
+    created_at: Mapped[str] = mapped_column(String, default=now)
+
+
+class MailConsumption(Base):
+    __tablename__ = "mail_consumption"
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    challenge_id: Mapped[str] = mapped_column(String)
+
+
+class MailOAuth(Base):
+    __tablename__ = "mail_oauth"
+    state_hash: Mapped[str] = mapped_column(String, primary_key=True)
+    browser_hash: Mapped[str] = mapped_column(String)
+    verifier: Mapped[str] = mapped_column(Text)
+    expires: Mapped[float] = mapped_column(Float)
 
 
 def record(obj):

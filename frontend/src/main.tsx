@@ -42,6 +42,7 @@ import type {
 import "@fontsource-variable/dm-sans";
 import "@fontsource-variable/manrope";
 import "./style.css";
+import { MailSettings } from "./mail";
 
 async function api<T = any>(
   path: string,
@@ -159,7 +160,11 @@ function Field({
 function App() {
   const [data, setData] = useState<Snapshot | null>(null),
     [authenticated, setAuthenticated] = useState(true);
-  const [page, setPage] = useState("Overview"),
+  const [page, setPage] = useState(
+      new URLSearchParams(location.search).has("gmail")
+        ? "Settings"
+        : "Overview",
+    ),
     [busy, setBusy] = useState(false),
     [notice, setNotice] = useState(""),
     [error, setError] = useState("");
@@ -1836,6 +1841,7 @@ function Settings({ data, act }: { data: Snapshot; act: Action }) {
           </div>
         </section>
       </div>
+      <MailSettings request={api} act={act} />
       <section className="panel form-panel subsection">
         <div className="section-top">
           <div>
@@ -1884,9 +1890,9 @@ function Settings({ data, act }: { data: Snapshot; act: Action }) {
           </button>
         </form>
         <small className="muted">
-          Expired sessions, email verification, OTPs, and unsupported widgets
-          are sent to review. Session files remain in your private data
-          directory.
+          Expired sessions, password creation, SMS codes, and unsupported
+          widgets are sent to review. Email verification uses the connection
+          above. Session files remain in your private data directory.
         </small>
       </section>
       <section className="panel form-panel subsection">
