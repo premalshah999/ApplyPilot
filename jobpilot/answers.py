@@ -259,6 +259,29 @@ US_STATES = {
 }
 
 
+# Facts saved for the US (authorization, sponsorship, citizenship, visa) do not answer the same
+# question about another country.
+COUNTRY_SCOPED = {
+    "requires_sponsorship", "requires_future_sponsorship_us", "needs_sponsorship", "work_authorized_us",
+    "work_authorized", "work_authorization_us", "us_citizen", "visa_status",
+}
+OTHER_COUNTRY = re.compile(
+    r"\b(?:canada|canadian|united kingdom|u\.?k\.?|britain|british|england|scotland|ireland|irish|germany|"
+    r"german|france|french|netherlands|dutch|spain|spanish|italy|portugal|poland|switzerland|swiss|sweden|"
+    r"norway|denmark|finland|belgium|austria|europe|european union|e\.?u\.?|eea|india|indian|china|"
+    r"chinese|japan|singapore|australia|australian|new zealand|mexico|brazil|argentina|israel|uae|"
+    r"dubai|philippines|south africa|korea|hong kong|taiwan|vietnam|indonesia|malaysia|colombia|chile|"
+    r"costa rica|qatar|saudi|egypt|nigeria|kenya|turkey|romania|czech|hungary|ukraine|greece)\b",
+    re.I,
+)
+NOT_DESIRED = re.compile(r"\b(?:current|previous|present|last|prior|most recent|past)\b", re.I)
+NOT_AVAILABILITY = re.compile(
+    r"\b(?:current|previous|last|most recent|prior|past) (?:job|role|position|employer|company)|"
+    r"start date (?:at|with|of|for) (?:your|the|this)? ?(?:current|previous|last|prior)",
+    re.I,
+)
+
+
 def month_year(value):
     """'2021-06' -> '06/2021', '2021' -> '2021'. Precision is never invented."""
     v = str(value).strip()
@@ -582,6 +605,14 @@ class Resolver:
         for pattern, keys in INTENTS:
             if not pattern.search(f["label"]):
                 continue
+            if f.get("type") == "textarea":
+                return None  # Prose is written from evidence, never a stored yes/no or amount.
+            if set(keys) & COUNTRY_SCOPED and OTHER_COUNTRY.search(f["label"]):
+                return None  # The saved facts are about the US; another country needs interpretation.
+            if "desired_salary" in keys and NOT_DESIRED.search(f["label"]):
+                return None  # "Current/previous salary" is a different fact.
+            if "availability" in keys and NOT_AVAILABILITY.search(f["label"]):
+                return None
             key = next((k for k in keys if k in facts and facts[k] not in ("", None)), None)
             value = facts.get(key) if key else None
             if value is None:
@@ -598,6 +629,8 @@ class Resolver:
                 return None
             options = f.get("options", [])
             boolean = isinstance(value, bool) or str(value).lower() in {"true", "false", "yes", "no"}
+            if boolean and f.get("type") == "text" and len(f["label"]) > 120:
+                return None  # A long free-text prompt is not a yes/no screening question.
             if boolean and NEGATED.search(f["label"]):
                 # "Will you NOT require sponsorship?" needs interpretation, not a stored yes/no.
                 return None
