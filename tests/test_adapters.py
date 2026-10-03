@@ -101,7 +101,7 @@ async def harness(service, config, prepared, monkeypatch):
     inbox = FakeGmail(EMAIL).connect(service)
     config.application_password = PASSWORD
     config.account_email = EMAIL
-    config.mail_wait_seconds = 15
+    config.mail_wait_seconds = 45  # Windows open before the triggering click; allow for load.
     config.mail_poll_seconds = 0.2
     config.multipage_timeout = 240
     service.db.set_setting("profile", PROFILE)
@@ -391,3 +391,95 @@ async def test_application_form_with_embedded_password_never_submits_in_dry_run(
     assert result["state"] == "dry_run_passed", result
     assert site.submissions == []
     assert all(method == "GET" for method, _ in site.requests)
+
+
+# ----- regressions: untrusted verification email and false confirmations ---------------------
+class DecoyOracle(MockOracle):
+    """Before the genuine PIN email, the mailbox receives look-alike messages a careless matcher
+    would accept: spoofed (DMARC fail), a look-alike domain, another recipient, another tenant."""
+
+    def __init__(self, inbox, genuine=True):
+        super().__init__(inbox)
+        self.genuine, self.pin_attempts = genuine, []
+
+    def mail(self, to, sender, subject, text, link=None, link_text="Verify"):
+        self.inbox.deliver(to, sender, subject, "Your verification code is 111111.", authenticated=False)
+        self.inbox.deliver(to, "no-reply@oraclecloud.com.evil.test", subject, "Your verification code is 222222.")
+        self.inbox.deliver("someone@example.test", sender, subject, "Your verification code is 333333.")
+        self.inbox.deliver(to, "no-reply@globex.fa.oraclecloud.com", subject, "Your verification code is 444444.")
+        if self.genuine:
+            super().mail(to, sender, subject, text, link, link_text)
+
+    def api(self, name, body, query):
+        if name == "pin":
+            self.pin_attempts.append(body.get("pin"))
+        return super().api(name, body, query)
+
+
+async def test_regression_decoy_codes_are_never_entered(harness, service):
+    save(service.db, MOTIVATION, "Building reliable platforms that other engineers depend on.", [], "Acme")
+    site = DecoyOracle(harness.inbox)
+    site.add_account(EMAIL, PASSWORD)
+    result = await harness(site, MockOracle.job_url)
+    assert result["state"] == "dry_run_passed", result
+    assert len(site.pin_attempts) == 1 and site.pin_attempts[0] not in {"111111", "222222", "333333", "444444"}
+    assert site.submissions == []
+
+
+async def test_regression_only_untrusted_codes_means_no_code_and_no_guess(harness, service):
+    save(service.db, MOTIVATION, "Building reliable platforms that other engineers depend on.", [], "Acme")
+    service.config.mail_wait_seconds = 6
+    site = DecoyOracle(harness.inbox, genuine=False)
+    site.add_account(EMAIL, PASSWORD)
+    result = await harness(site, MockOracle.job_url)
+    assert result["state"] == "needs_review", result
+    assert "did not arrive or was not unique" in result["reason"]
+    assert site.pin_attempts == [] and site.submissions == []
+
+
+class OtherTenantWorkday(MockWorkday):
+    """Another Workday tenant's activation email (same shared sender) arrives first."""
+
+    def __init__(self, inbox, genuine=True):
+        super().__init__(inbox)
+        self.genuine = genuine
+
+    def mail(self, to, sender, subject, text, link=None, link_text="Verify"):
+        self.inbox.deliver(
+            to,
+            "globex@myworkday.com",
+            "Globex - Verify your candidate account",
+            "Please verify your email to activate your account.",
+            "https://globex.wd1.myworkdayjobs.com/en-US/External/activate/foreign",
+            "Verify Account",
+        )
+        if self.genuine:
+            super().mail(to, sender, subject, text, link, link_text)
+
+
+async def test_regression_another_tenants_link_is_never_opened(harness, service):
+    site = OtherTenantWorkday(harness.inbox)
+    result = await harness(site, MockWorkday.job_url)
+    assert result["state"] == "dry_run_passed", result
+    assert site.accounts[EMAIL]["verified"]
+
+
+async def test_regression_only_another_tenants_link_leaves_the_account_unverified(harness, service):
+    service.config.mail_wait_seconds = 6
+    site = OtherTenantWorkday(harness.inbox, genuine=False)
+    result = await harness(site, MockWorkday.job_url)
+    assert result["state"] not in {"dry_run_passed", "confirmed"}, result
+    assert site.accounts[EMAIL]["verified"] is False  # Created, never activated by the foreign link.
+    assert all(token[0] == "activate" for token in site.tokens.values())  # Our link is still unused.
+
+
+async def test_owned_submit_runs_record_exactly_one_submission_and_one_receipt(harness, service):
+    site = MockICIMS(harness.inbox)
+    result = await harness(site, MockICIMS.job_url, mode="submit")
+    assert result["state"] == "confirmed", result
+    assert len(site.submissions) == 1
+    receipt = result["receipt"]
+    assert receipt["type"] == "explicit_confirmation_page" and receipt["website_confirmed"] is True
+    assert receipt["email_confirmed"] is False  # No acknowledgement email in this fixture.
+    with service.db.session() as s:
+        assert s.scalar(select(Run).where(Run.id == result["id"])).state == "confirmed"
