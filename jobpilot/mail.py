@@ -80,12 +80,14 @@ def tenant_tokens(url, company=""):
         # wd1.myworkdaysite.com/recruiting/<tenant>/<site>
         words += re.split(r"[^a-z0-9]+", p.path.lower())[:4]
     words += re.split(r"[^a-z0-9]+", (company or "").lower())
+    # "HealthEdge" -> healthedge, "My Funded Futures" -> myfundedfutures (an employer's domain label).
+    words.append(re.sub(r"[^a-z0-9]", "", (company or "").lower()))
     out = []
     for w in words:
         if len(w) >= 4 and w not in GENERIC_LABELS and not re.fullmatch(r"wd\d+|fa|ocs|\d+", w):
             if w not in out:
                 out.append(w)
-    return out[:6]
+    return out[:8]
 
 
 def sender_allowed(domain, domains, tokens=(), employer_senders=False):
@@ -94,9 +96,16 @@ def sender_allowed(domain, domains, tokens=(), employer_senders=False):
         return True
     if not employer_senders:
         return False
-    labels = domain.split(".")
-    second = labels[-3] if len(labels) >= 3 and labels[-2] in {"co", "com", "org", "net"} else labels[-2] if len(labels) >= 2 else ""
-    return any(len(t) >= 4 and second.startswith(t) for t in tokens)
+    # The employer's own domain: its registrable label equals the tenant or company name exactly
+    # ("healthedge.com" for HealthEdge). Prefix look-alikes ("healthedge-careers.com") never pass.
+    return employer_label(domain) in {t for t in tokens if len(t) >= 4}
+
+
+def employer_label(domain):
+    labels = domain.lower().split(".")
+    if len(labels) >= 3 and labels[-2] in {"co", "com", "org", "net", "ac", "gov"} and len(labels[-1]) == 2:
+        return labels[-3]
+    return labels[-2] if len(labels) >= 2 else ""
 
 
 def tenant_conflict(address, domain, tokens):
@@ -633,6 +642,10 @@ class MailService:
             previous = s.scalar(
                 select(MailChallenge).where(MailChallenge.run_id == run_id, MailChallenge.state.in_(LIVE))
             )
+            if previous and previous.expires <= current:
+                # Past its deadline: close it instead of reusing a window that can no longer match.
+                previous.state, previous.payload, previous.reason = "expired", "", "Verification deadline ended"
+                previous = None
             if previous:
                 return record(previous)
             # Serialize ambiguous sender groups even when different employers share a vendor.

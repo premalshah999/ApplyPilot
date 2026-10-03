@@ -322,8 +322,13 @@ class BrowserEngine:
                     self.result = await self.finish()
                 else:
                     if resumed and (receipt := await self.form.proof()):
-                        receipt["resumed_browser"] = True
-                        return {"state": "confirmed", "reason": "Confirmation found in the resumed browser", "receipt": receipt}
+                        # Only new evidence counts: the app's own earlier submit attempt, or a
+                        # confirmation that appeared after you finished the step in the tab. The
+                        # page that made the previous run pause is never re-read as a receipt.
+                        if pending.get("armed") or receipt.get("confirmation") != pending.get("proof"):
+                            receipt["resumed_browser"] = True
+                            receipt["submitted_by"] = "app" if pending.get("armed") else "applicant"
+                            return {"state": "confirmed", "reason": "Confirmation found in the resumed browser", "receipt": receipt}
                     if ats == "workday":
                         from .workday import WorkdayAuth
 
@@ -405,12 +410,18 @@ class BrowserEngine:
                     cdp = await self.context.new_cdp_session(self.page)
                     info = await cdp.send("Target.getTargetInfo")
                     await cdp.detach()
+                    try:
+                        shown = ((await self.form.proof()) or {}).get("confirmation", "")
+                    except Exception:
+                        shown = ""
                     self.db.set_setting("desktop_job:" + job["id"], {
                         "target_id": info["targetInfo"]["targetId"],
                         "resume_sha": run["packet"]["resume_sha"],
                         "ledger": self.form.ledger,
                         "uploaded": self.form.uploaded,
                         "upload_verified": self.form.upload_verified,
+                        "armed": self.armed,
+                        "proof": shown,
                     })
                     await self.page.unroute_all(behavior="ignoreErrors")
                 else:

@@ -357,8 +357,8 @@ class Service:
             raise ValueError("Provide confirmation evidence or an explanation of non-submission")
         with self.db.exclusive() as s:
             run = s.get(Run, run_id)
-            if not run or run.state != "submission_unknown":
-                raise ValueError("Only uncertain submissions can be reconciled")
+            if not run or run.state not in {"submission_unknown", "already_applied"}:
+                raise ValueError("Only uncertain submissions or already-applied notices can be reconciled")
             run.state = "confirmed" if submitted else "needs_review"
             run.receipt = {"type": "user_reconciled", "evidence": evidence[:4000], "at": now()}
             run.reason = "Submission reconciled by the applicant"

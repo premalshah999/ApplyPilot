@@ -37,9 +37,10 @@ CONFIRM_TEXT = re.compile(
     r"congratulations.{0,60}(?:submitted|applied)",
     re.I,
 )
+# Explicit statements only. "Already applied? Sign in" footers and drafts are not applications.
 ALREADY = re.compile(
-    r"(?:you(?:'ve| have) )?already applied|previously applied|already submitted an application|"
-    r"you have an application in progress for this|application for this (?:job|position) already",
+    r"you(?:'ve| have) already applied|you have previously applied|already submitted an application|"
+    r"application for this (?:job|position|role) (?:has )?already been submitted",
     re.I,
 )
 CLOSED = re.compile(
@@ -163,6 +164,7 @@ class Adapter:
         self.challenge = None  # The open mail request window (MailService challenge).
         self.committed = False
         self.before_commit = None
+        self.commit_pages = set()  # Signatures of pages whose final control was clicked.
         self.post_commit_steps = 0
         self.apply_url = None
         self.last_step = None
@@ -354,7 +356,7 @@ class Adapter:
             and (self.committed or not self.find_apply(obs))
         ):
             return Step.CONFIRMATION
-        if ALREADY.search(text) and not passwords and len(meaningful) <= 1:
+        if ALREADY.search(text) and not passwords and len(meaningful) <= 1 and not self.find_apply(obs):
             return Step.ALREADY_APPLIED
         codes = self.code_fields(obs)
         if codes:
@@ -479,7 +481,8 @@ class Adapter:
                     return self.defer(
                         "A required agreement on the email step needs your approval", [self.review_for(f)]
                     )
-        await self.arm_mail()
+        if not await self.arm_mail():
+            return self.lease_busy()
         target = self.find_next(obs) or next(iter(self.buttons(obs, AUTH_BUTTON)), None)
         if not target:
             return {"fallback": True}
@@ -542,7 +545,8 @@ class Adapter:
             ]
             if resend and self.attempts["email_code"] == 1:
                 self.release_mail()
-                await self.arm_mail("code")
+                if not await self.arm_mail("code"):
+                    return self.lease_busy()
                 await self.click(resend[0], auth=True)
                 token = await self.wait_email("code")
             if not token:
@@ -612,6 +616,12 @@ class Adapter:
                     return repaired
 
     async def on_review(self, obs, report=None):
+        if self.committed and self.signature(Step.REVIEW, await self.form.scan()) in self.commit_pages:
+            # The submitted page is still showing: never click its Submit a second time.
+            return {
+                "state": "submission_unknown",
+                "reason": "Submission attempted; the page did not change and it was not submitted again",
+            }
         if report is None:
             report = await self.form.verify()
         problems = [
@@ -627,7 +637,8 @@ class Adapter:
             problems = [p for p in report["problems"] if not p.startswith("Resume attachment")]
             if problems:
                 return self.defer("; ".join(problems[:6]), report.get("pending"))
-        if self.form.resume_fields() and not self.form.upload_verified:
+        if (self.form.resume_fields() or self.form.resume_seen) and not self.form.upload_verified:
+            # Checked for the whole application, not only the page that had the upload.
             return self.defer("Resume attachment was not accepted")
         if self.run_record["mode"] == "dry_run":
             return {
@@ -664,7 +675,12 @@ class Adapter:
     async def on_already_applied(self, obs):
         if self.committed:
             return await self.on_confirmation(obs)
-        return {"state": "already_applied", "reason": "The employer says you already applied to this job"}
+        return {
+            "state": "already_applied",
+            "reason": "The employer says you already applied to this job",
+            "receipt": {"type": "employer_already_applied", "url": self.page.url,
+                        "evidence": (ALREADY.search(obs["text"]) or [""])[0][:200]},
+        }
 
     async def on_closed(self, obs):
         return {"state": "closed", "reason": "The posting is closed or no longer available"}
@@ -750,6 +766,8 @@ class Adapter:
         if challenge := await self.solve_captcha():
             return challenge  # Unsolved check before anything was submitted.
         self.before_commit = await self.form.proof()
+        page = await self.form.scan()
+        self.commit_pages.add(self.signature(Step.REVIEW, page))
         if not self.committed:
             self.service.reserve_submission(self.e.run_id)
         self.e.armed = True
@@ -783,8 +801,13 @@ class Adapter:
             step = self.classify(obs)
             if step == Step.EMAIL_CODE:
                 return None  # Post-submit verification (e.g. Greenhouse security code).
-            if step in {Step.FORM, Step.REVIEW} and self.app_fields(obs) and not obs["errors"]:
-                # Some ATSs show optional pages after the commit (survey, EEO). Continue the loop.
+            if (
+                step in {Step.FORM, Step.REVIEW}
+                and self.app_fields(obs)
+                and not obs["errors"]
+                and self.signature(Step.REVIEW, obs) not in self.commit_pages
+            ):
+                # A genuinely new page after the commit (survey, EEO). Continue the loop.
                 return None
             if obs["errors"] and step in {Step.FORM, Step.REVIEW}:
                 break
@@ -824,17 +847,34 @@ class Adapter:
         run can never consume another's code."""
         self.challenge_since = time.time() - 5
         if self.inbox.live(self.challenge) or not self.inbox.configured:
-            return
+            return True
         try:
+            # Wait out another run's window (it lasts at most MAIL_WAIT_SECONDS).
             self.challenge = await self.inbox.arm(
-                self.e.run_id, self.job, self.accounts.email, kind, since=self.challenge_since
+                self.e.run_id,
+                self.job,
+                self.accounts.email,
+                kind,
+                since=self.challenge_since,
+                patience=self.config.mail_wait_seconds + 30,
             )
         except ValueError as exc:
+            # Another application holds this sender: sending now could hand our code to it.
             self.challenge = None
             self.emit("mail_wait", str(exc)[:200])
+            return False
+        return True  # Armed, or no sender rule for this employer (nothing can be matched).
+
+    def lease_busy(self):
+        return self.defer(
+            "Another application kept the same email sender busy; nothing was sent. Requeue this job",
+            state="timed_out",
+        )
 
     def release_mail(self):
-        if self.inbox.live(self.challenge):
+        # Close it even when its deadline has passed: a stale pending window must never be
+        # handed back by the next begin().
+        if self.challenge:
             self.inbox.finish(self.challenge, "cancelled", "No email was needed")
         self.challenge = None
 
@@ -959,7 +999,8 @@ class Adapter:
             self.emit("auth", "Account fields are part of the application form")
             return await self.on_form(await self.form.scan())
         if mode == "create":
-            await self.arm_mail()
+            if not await self.arm_mail():
+                return self.lease_busy()
             # Saved before the click: the same shared login, so a crash cannot lose it.
             self.accounts.mark(url, "created_locally", credentials)
         await self.click(button, auth=True)
@@ -1106,7 +1147,8 @@ class Adapter:
         if not button:
             return self.defer("The password reset step has no submit control")
         self.release_mail()
-        await self.arm_mail("password_reset")
+        if not await self.arm_mail("password_reset"):
+            return self.lease_busy()
         if not self.challenge:
             return self.defer("The reset email could not be matched safely right now; retry later")
         previous = self.accounts.saved(url)
