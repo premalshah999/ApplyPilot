@@ -127,6 +127,8 @@ def test_browser_use_and_mimo_protocol_together(server, resume_pdf, monkeypatch)
             raise
 
     monkeypatch.setattr(BrowserEngine, "run", diagnosed_run)
+    # This test pins the navigation-model protocol; adapters would finish without the model.
+    monkeypatch.setattr(config, "engine", "agent")
     config.mimo_api_key = "synthetic-provider-key"
     config.mimo_base_url = url + "/fake-mimo/v1"
     config.allow_private_urls = True
@@ -160,6 +162,48 @@ def test_browser_use_and_mimo_protocol_together(server, resume_pdf, monkeypatch)
             assert detail["run"]["model_calls"] == 3
             assert detail["run"]["cost"] > 0
             assert len(detail["answers"]) >= 5
+            c.delete("/api/resumes/" + rid)
+            c.put("/api/profile", json={})
+    finally:
+        config.mimo_api_key = ""
+        config.allow_private_urls = False
+
+
+def test_generic_adapter_finishes_custom_site_without_model(server, resume_pdf):
+    """The deterministic driver handles a plain career-site form: zero navigation-model calls."""
+    url, config, service = server
+    config.mimo_api_key = "synthetic-provider-key"
+    config.mimo_base_url = url + "/fake-mimo/v1"
+    config.allow_private_urls = True
+    try:
+        with httpx.Client(
+            base_url=url, headers={"Authorization": "Bearer " + config.app_token}, trust_env=False, timeout=10
+        ) as c:
+            rid = c.post(
+                "/api/resumes", data={"name": "Adapter fixture"}, files={"file": ("resume.pdf", resume_pdf)}
+            ).json()["id"]
+            c.put(
+                "/api/profile",
+                json={
+                    "name": "Alex Example",
+                    "email": "alex@example.test",
+                    "phone": "2025550100",
+                    "location": "New York",
+                    "facts": {"first_name": "Alex", "last_name": "Example"},
+                },
+            )
+            job = c.post(
+                "/api/jobs",
+                json={"url": url + "/fixture/live?adapter=1", "title": "Adapter fixture", "company": "Local"},
+            ).json()["job"]
+            run = c.post(f"/api/jobs/{job['id']}/queue", json={"resume_id": rid, "mode": "dry_run"})
+            assert run.status_code == 200, run.text
+            detail = wait_result(c, run.json()["id"])
+            assert detail["run"]["state"] == "dry_run_passed", detail
+            assert detail["run"]["model_calls"] == 0
+            assert all(a["verified"] for a in detail["answers"].values()) and len(detail["answers"]) >= 5
+            kinds = [e["kind"] for e in detail["events"]]
+            assert "step" in kinds and "agent_step" not in kinds
             c.delete("/api/resumes/" + rid)
             c.put("/api/profile", json={})
     finally:

@@ -32,6 +32,7 @@ flowchart TD
 - `answers.py`: exact answer cache, identity facts, demographic decline policy, consent approval, model answer validation.
 - `forms.py`: frame observations, stable control IDs, actual option labels, uploads, fill actions, read-back checks, answer ledger.
 - `browser.py`: browser lifetime, navigation agent, fast path, submission guard, timeout, proof capture.
+- `adapters/`, `widgets.py`, `js/scan.js`, `accounts.py`, `inbox.py`, `knowledge.py`: the autonomous engine (ATS state machines, widget drivers, shared login, Gmail IMAP verification, learned answers); see [autonomous engine](autonomous-engine.md).
 - `models.py`: one metered HTTP transport for navigation, classification, and question answering.
 - `telegram.py` / `capsolver.py`: optional external integrations.
 - `frontend/`: React/TypeScript/Vite dashboard. Fonts are bundled locally.

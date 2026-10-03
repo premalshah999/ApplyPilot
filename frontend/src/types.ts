@@ -53,6 +53,58 @@ export type Source = {
   last_run: string | null;
   next_run: string;
 };
+export type Address = {
+  line1: string;
+  line2: string;
+  city: string;
+  state: string;
+  postal_code: string;
+  country: string;
+  county: string;
+};
+export type WorkEntry = {
+  company: string;
+  title: string;
+  location: string;
+  start: string;
+  end: string;
+  current: boolean;
+  description: string;
+};
+export type EducationEntry = {
+  school: string;
+  degree: string;
+  field_of_study: string;
+  start: string;
+  end: string;
+  gpa: string;
+};
+export type KnowledgeEntry = {
+  id: string;
+  question: string;
+  answer: string;
+  options: string[];
+  scope: string;
+  source: string;
+  updated_at: string;
+};
+export type AccountRow = {
+  id: string;
+  realm: string;
+  ats: string;
+  email: string;
+  state: string;
+  resets: number;
+  last_error: string;
+  updated_at: string;
+  password_current: boolean;
+};
+export type AccountSummary = {
+  email: string;
+  password_configured: boolean;
+  password_problems: string[];
+  accounts: AccountRow[];
+};
 export type Profile = {
   name: string;
   email: string;
@@ -60,6 +112,22 @@ export type Profile = {
   location: string;
   linkedin: string;
   website: string;
+  github: string;
+  first_name: string;
+  last_name: string;
+  middle_name: string;
+  preferred_name: string;
+  phone_country_code: string;
+  phone_type: string;
+  address: Address;
+  work: WorkEntry[];
+  education: EducationEntry[];
+  skills: string[];
+  languages: string[];
+  referral_source: string;
+  salary_expectation: string;
+  availability: string;
+  auto_accept_consents: boolean;
   facts: Record<string, unknown>;
   evidence: { id: string; text: string }[];
   target_roles: string[];
@@ -97,6 +165,13 @@ export type Snapshot = {
     mimo: boolean;
     telegram: boolean;
     capsolver: boolean;
+    engine: string;
+    multipage_timeout: number;
+    account: boolean;
+    account_email: string;
+    imap: boolean;
+    telegram_wait: number;
+    auto_requeue: boolean;
   };
   ats: { id: string; name: string; tier: string; guidance: string }[];
 };

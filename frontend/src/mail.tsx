@@ -304,9 +304,10 @@ export function MailSettings({
               </div>
             ))}
             <p className="muted small">
-              Dedicated email-verification steps are supported. Password
-              creation, SMS codes, and passkeys still require an employer
-              session. A missing or ambiguous email stops that run for review.
+              Rules here apply to the OAuth mailbox and the navigation model.
+              The ATS adapters use GMAIL_APP_PASSWORD (or this mailbox) with
+              built-in sender rules, so most employers need no rule. SMS codes
+              and passkeys still require an employer session.
             </p>
           </div>
           <h3>Verification history</h3>

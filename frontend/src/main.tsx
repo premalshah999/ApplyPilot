@@ -43,6 +43,12 @@ import "@fontsource-variable/dm-sans";
 import "@fontsource-variable/manrope";
 import "./style.css";
 import { MailSettings } from "./mail";
+import {
+  AccountSettings,
+  ApplicationProfile,
+  LearnedAnswers,
+  parseHistory,
+} from "./autonomy";
 
 async function api<T = any>(
   path: string,
@@ -1354,199 +1360,220 @@ function Knowledge({ initial, act }: { initial: Profile; act: Action }) {
     [facts, setFacts] = useState(JSON.stringify(initial.facts, null, 2)),
     [evidence, setEvidence] = useState(
       initial.evidence.map((e) => e.text).join("\n\n---\n\n"),
-    );
+    ),
+    [history, setHistory] = useState({
+      work: initial.work?.length ? JSON.stringify(initial.work, null, 2) : "",
+      education: initial.education?.length
+        ? JSON.stringify(initial.education, null, 2)
+        : "",
+    });
   const set = (k: keyof Profile, v: unknown) => setP((x) => ({ ...x, [k]: v }));
   return (
-    <form
-      onSubmit={(e) => {
-        e.preventDefault();
-        act(async () => {
-          let f: unknown;
-          try {
-            f = JSON.parse(facts);
-          } catch {
-            throw new Error("Verified facts must be valid JSON");
-          }
-          if (!f || Array.isArray(f) || typeof f !== "object")
-            throw new Error("Verified facts must be a JSON object");
-          await api("/profile", "PUT", {
-            ...p,
-            facts: f,
-            evidence: evidence
-              .split(/\n\s*---\s*\n/)
-              .filter((x) => x.trim())
-              .map((text, i) => ({ id: "note-" + (i + 1), text: text.trim() })),
-          });
-        }, "Knowledge base saved");
-      }}
-    >
-      <div className="knowledge-grid">
-        <section className="panel form-panel">
-          <div className="section-top">
-            <h2>Personal details</h2>
-            <UserRound size={19} />
-          </div>
-          <div className="form-grid">
-            {[
-              ["name", "Full legal name"],
-              ["email", "Email address"],
-              ["phone", "Phone number"],
-              ["location", "Current location"],
-              ["linkedin", "LinkedIn URL"],
-              ["website", "Portfolio / website"],
-            ].map(([k, t]) => (
-              <Field key={k} title={t}>
-                <input
-                  type={k === "email" ? "email" : "text"}
-                  value={String(p[k as keyof Profile] || "")}
-                  onChange={(e) => set(k as keyof Profile, e.target.value)}
-                />
-              </Field>
-            ))}
-          </div>
-          <div className="section-top subsection">
-            <h2>Opportunity preferences</h2>
-          </div>
-          <Field title="Target roles">
-            <input
-              value={p.target_roles.join(", ")}
-              onChange={(e) =>
-                set(
-                  "target_roles",
-                  e.target.value.split(",").map((x) => x.trim()),
-                )
-              }
-              placeholder="Software Engineer, Data Engineer"
-            />
-          </Field>
-          <Field title="Target locations">
-            <input
-              value={p.target_locations.join(", ")}
-              onChange={(e) =>
-                set(
-                  "target_locations",
-                  e.target.value.split(",").map((x) => x.trim()),
-                )
-              }
-              placeholder="New York, Remote US"
-            />
-          </Field>
-          <div className="form-grid">
-            <Field title="Exclude title keywords">
+    <>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          act(async () => {
+            let f: unknown;
+            try {
+              f = JSON.parse(facts);
+            } catch {
+              throw new Error("Verified facts must be valid JSON");
+            }
+            if (!f || Array.isArray(f) || typeof f !== "object")
+              throw new Error("Verified facts must be a JSON object");
+            await api("/profile", "PUT", {
+              ...p,
+              ...parseHistory(history),
+              facts: f,
+              evidence: evidence
+                .split(/\n\s*---\s*\n/)
+                .filter((x) => x.trim())
+                .map((text, i) => ({
+                  id: "note-" + (i + 1),
+                  text: text.trim(),
+                })),
+            });
+          }, "Knowledge base saved");
+        }}
+      >
+        <div className="knowledge-grid">
+          <section className="panel form-panel">
+            <div className="section-top">
+              <h2>Personal details</h2>
+              <UserRound size={19} />
+            </div>
+            <div className="form-grid">
+              {[
+                ["name", "Full legal name"],
+                ["email", "Email address"],
+                ["phone", "Phone number"],
+                ["location", "Current location"],
+                ["linkedin", "LinkedIn URL"],
+                ["website", "Portfolio / website"],
+              ].map(([k, t]) => (
+                <Field key={k} title={t}>
+                  <input
+                    type={k === "email" ? "email" : "text"}
+                    value={String(p[k as keyof Profile] || "")}
+                    onChange={(e) => set(k as keyof Profile, e.target.value)}
+                  />
+                </Field>
+              ))}
+            </div>
+            <div className="section-top subsection">
+              <h2>Opportunity preferences</h2>
+            </div>
+            <Field title="Target roles">
               <input
-                value={p.excluded_keywords.join(", ")}
+                value={p.target_roles.join(", ")}
                 onChange={(e) =>
                   set(
-                    "excluded_keywords",
+                    "target_roles",
                     e.target.value.split(",").map((x) => x.trim()),
+                  )
+                }
+                placeholder="Software Engineer, Data Engineer"
+              />
+            </Field>
+            <Field title="Target locations">
+              <input
+                value={p.target_locations.join(", ")}
+                onChange={(e) =>
+                  set(
+                    "target_locations",
+                    e.target.value.split(",").map((x) => x.trim()),
+                  )
+                }
+                placeholder="New York, Remote US"
+              />
+            </Field>
+            <div className="form-grid">
+              <Field title="Exclude title keywords">
+                <input
+                  value={p.excluded_keywords.join(", ")}
+                  onChange={(e) =>
+                    set(
+                      "excluded_keywords",
+                      e.target.value.split(",").map((x) => x.trim()),
+                    )
+                  }
+                />
+              </Field>
+              <Field title="Minimum match score">
+                <input
+                  type="number"
+                  min="0"
+                  max="100"
+                  value={p.minimum_fit}
+                  onChange={(e) => set("minimum_fit", Number(e.target.value))}
+                />
+              </Field>
+            </div>
+            <label className="checkline">
+              <input
+                type="checkbox"
+                checked={p.decline_demographics}
+                onChange={(e) => set("decline_demographics", e.target.checked)}
+              />
+              <span>
+                Choose “prefer not to identify” on demographic questions
+              </span>
+            </label>
+          </section>
+          <section className="panel form-panel">
+            <div className="section-top">
+              <h2>Verified facts</h2>
+              <ShieldCheck size={19} />
+            </div>
+            <p className="muted">
+              Add explicit facts with clear time and country scope. First and
+              last names must be separate verified facts; the worker will not
+              guess them.
+            </p>
+            <Field title="Structured facts (JSON)">
+              <textarea
+                className="code-input facts"
+                spellCheck={false}
+                value={facts}
+                onChange={(e) => setFacts(e.target.value)}
+              />
+            </Field>
+            <details>
+              <summary>Example structure</summary>
+              <pre>
+                {
+                  '{\n  "work_authorized_us": true,\n  "requires_sponsorship": false,\n  "over_18": true,\n  "us_citizen": false,\n  "visa_status": "Your actual status",\n  "previously_employed_here": false,\n  "has_relatives_at_employer": false,\n  "has_non_compete": false,\n  "willing_to_relocate": true,\n  "willing_to_travel": true,\n  "willing_onsite": true,\n  "criminal_conviction": false,\n  "security_clearance": "None",\n  "desired_salary": "Your range",\n  "years_experience": 3\n}'
+                }
+              </pre>
+            </details>
+            <div className="note small">
+              <span>
+                Answer disclosure questions from facts. “No convictions” does
+                not imply “No” to a promise to follow anti-corruption policies.
+              </span>
+            </div>
+            <Field
+              title="Approved consent statements"
+              hint="One exact checkbox label per line. Only list commitments you accept."
+            >
+              <textarea
+                value={p.approved_consents.join("\n")}
+                onChange={(e) =>
+                  set(
+                    "approved_consents",
+                    e.target.value.split("\n").filter(Boolean),
                   )
                 }
               />
             </Field>
-            <Field title="Minimum match score">
-              <input
-                type="number"
-                min="0"
-                max="100"
-                value={p.minimum_fit}
-                onChange={(e) => set("minimum_fit", Number(e.target.value))}
-              />
-            </Field>
-          </div>
-          <label className="checkline">
-            <input
-              type="checkbox"
-              checked={p.decline_demographics}
-              onChange={(e) => set("decline_demographics", e.target.checked)}
-            />
-            <span>
-              Choose “prefer not to identify” on demographic questions
-            </span>
-          </label>
-        </section>
-        <section className="panel form-panel">
-          <div className="section-top">
-            <h2>Verified facts</h2>
-            <ShieldCheck size={19} />
-          </div>
-          <p className="muted">
-            Add explicit facts with clear time and country scope. First and last
-            names must be separate verified facts; the worker will not guess
-            them.
-          </p>
-          <Field title="Structured facts (JSON)">
-            <textarea
-              className="code-input facts"
-              spellCheck={false}
-              value={facts}
-              onChange={(e) => setFacts(e.target.value)}
-            />
-          </Field>
-          <details>
-            <summary>Example structure</summary>
-            <pre>
-              {
-                '{\n  "first_name": "Your first name",\n  "last_name": "Your last name",\n  "work_authorization_US": "Your actual status",\n  "requires_future_sponsorship_US": true,\n  "conviction_history": "Your accurate history and scope",\n  "government_employment_history": "Include dates and public institutions"\n}'
-              }
-            </pre>
-          </details>
-          <div className="note small">
-            <span>
-              Answer disclosure questions from facts. “No convictions” does not
-              imply “No” to a promise to follow anti-corruption policies.
-            </span>
-          </div>
-          <Field
-            title="Approved consent statements"
-            hint="One exact checkbox label per line. Only list commitments you accept."
-          >
-            <textarea
-              value={p.approved_consents.join("\n")}
-              onChange={(e) =>
-                set(
-                  "approved_consents",
-                  e.target.value.split("\n").filter(Boolean),
-                )
-              }
-            />
-          </Field>
-          <small className="muted">
-            {Object.keys(p.approved_answers).length} exact answers saved from
-            your review inbox.
-          </small>
-        </section>
-      </div>
-      <section className="panel form-panel subsection">
-        <div className="section-top">
-          <div>
-            <h2>Experience & answer evidence</h2>
-            <p className="muted">
-              Projects, achievements, education, and clear examples your worker
-              can cite. Separate notes with a line containing three dashes
-              (---).
-            </p>
-          </div>
-          <FileText size={21} />
+            <small className="muted">
+              {Object.keys(p.approved_answers).length} exact answers saved from
+              your review inbox.
+            </small>
+          </section>
         </div>
-        <textarea
-          className="evidence-input"
-          value={evidence}
-          onChange={(e) => setEvidence(e.target.value)}
-          placeholder={
-            "Project: …\nWhat I did: …\nTechnologies: …\nResult: …\n\n---\n\nEducation and dates: …"
-          }
+        <ApplicationProfile
+          p={p}
+          set={set}
+          history={history}
+          setHistory={setHistory}
+          request={api}
+          act={act}
         />
-      </section>
-      <div className="save-bar">
-        <span>
-          <ShieldCheck size={16} /> Only facts you save can support application
-          answers.
-        </span>
-        <button className="button primary">
-          <Check size={16} /> Save knowledge base
-        </button>
-      </div>
-    </form>
+        <section className="panel form-panel subsection">
+          <div className="section-top">
+            <div>
+              <h2>Experience & answer evidence</h2>
+              <p className="muted">
+                Projects, achievements, education, and clear examples your
+                worker can cite. Separate notes with a line containing three
+                dashes (---).
+              </p>
+            </div>
+            <FileText size={21} />
+          </div>
+          <textarea
+            className="evidence-input"
+            value={evidence}
+            onChange={(e) => setEvidence(e.target.value)}
+            placeholder={
+              "Project: …\nWhat I did: …\nTechnologies: …\nResult: …\n\n---\n\nEducation and dates: …"
+            }
+          />
+        </section>
+        <div className="save-bar">
+          <span>
+            <ShieldCheck size={16} /> Only facts you save can support
+            application answers.
+          </span>
+          <button className="button primary">
+            <Check size={16} /> Save knowledge base
+          </button>
+        </div>
+      </form>
+      <LearnedAnswers request={api} act={act} />
+    </>
   );
 }
 
@@ -1841,6 +1868,7 @@ function Settings({ data, act }: { data: Snapshot; act: Action }) {
           </div>
         </section>
       </div>
+      <AccountSettings data={data} request={api} act={act} />
       <MailSettings request={api} act={act} />
       <section className="panel form-panel subsection">
         <div className="section-top">
@@ -1890,9 +1918,9 @@ function Settings({ data, act }: { data: Snapshot; act: Action }) {
           </button>
         </form>
         <small className="muted">
-          Expired sessions, password creation, SMS codes, and unsupported
-          widgets are sent to review. Email verification uses the connection
-          above. Session files remain in your private data directory.
+          Only needed for SMS or passkey sign-ins: accounts and email
+          verification are otherwise handled automatically. Session files remain
+          in your private data directory.
         </small>
       </section>
       <section className="panel form-panel subsection">

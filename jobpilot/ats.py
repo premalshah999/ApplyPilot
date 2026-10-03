@@ -10,7 +10,7 @@ class ATS:
     name: str
     domains: tuple[str, ...]
     guidance: str
-    tier: str = "browser adapter; live validation pending"
+    tier: str = "fixture-tested adapter; live validation pending"
 
 
 REGISTRY = [
@@ -36,23 +36,23 @@ REGISTRY = [
         "workday",
         "Workday",
         ("myworkdayjobs.com", "myworkdaysite.com"),
-        "Choose Apply Manually or Use My Last Application if available. Reconcile resume parsing. "
-        "Navigate My Information, My Experience, Application Questions, Disclosures, Review. "
-        "Use verify_email for dedicated email-code/link steps. Request session setup for passwords, SMS or passkeys; do not invent credentials.",
+        "Deterministic adapter: Apply Manually (or Use My Last Application), shared-login sign-in or account "
+        "creation with emailed verification, My Information, My Experience rows, questions, disclosures, "
+        "self-identify, Review. Use authenticate for sign-in pages and verify_email for codes/links.",
     ),
     ATS(
         "oracle",
         "Oracle Recruiting",
         ("oraclecloud.com",),
-        "Oracle HCM candidate experience often has contact/verification and multipage profile questions. "
-        "Use the actual job details/application URL. Use verify_email for dedicated email-code/link steps; unsupported account/profile flows require review.",
+        "Deterministic adapter: email + terms, emailed PIN for returning candidates, apply-flow sections with "
+        "pills and searchable selects, resume, e-signature, Submit. Use verify_email for the PIN.",
     ),
     ATS(
         "icims",
         "iCIMS",
         ("icims.com",),
-        "Inspect embedded frames. Profile login, separate EEO and screening sections may appear. "
-        "Use verify_email for dedicated email-code/link steps. Request session setup for password or unsupported authentication.",
+        "Deterministic adapter: loads the in_iframe content directly, email step, sign-in or profile "
+        "creation with the shared login (reset by email when needed), resume, profile, screening, Submit.",
     ),
     ATS(
         "smartrecruiters",
@@ -64,11 +64,73 @@ REGISTRY = [
         "taleo",
         "Taleo",
         ("taleo.net",),
-        "Multipage candidate profiles often need login and explicit Save and Continue. Reinspect each page.",
+        "Deterministic adapter: Login with the shared email as user name or New User registration, privacy "
+        "agreement, Save and Continue pages, Review and Submit.",
     ),
     ATS("workable", "Workable", ("workable.com",), "Inspect application and screening fields after upload."),
     ATS("bamboohr", "BambooHR", ("bamboohr.com",), "Inspect application fields and document upload status."),
+    ATS(
+        "eightfold",
+        "Eightfold",
+        ("eightfold.ai",),
+        "Apply opens a resume-first form. Upload, wait for parsing, then verify prefilled fields. "
+        "Some tenants email a one-time code.",
+    ),
+    ATS(
+        "successfactors",
+        "SAP SuccessFactors",
+        ("successfactors.com", "successfactors.eu", "sapsf.com", "jobs2web.com"),
+        "Sign in or create a candidate account, accept the data privacy statement, then one long form "
+        "whose final button is Apply.",
+    ),
+    ATS("jobvite", "Jobvite", ("jobvite.com",), "Single or multi-step form; upload resume first."),
+    ATS("avature", "Avature", ("avature.net",), "Multi-step portal, often with registration."),
+    ATS("phenom", "Phenom", ("phenompeople.com",), "Career site front end; Apply hands off to the real ATS."),
+    ATS("adp", "ADP Workforce Now", ("adp.com",), "Multi-step with optional account creation."),
+    ATS(
+        "ukg",
+        "UKG / UltiPro",
+        ("ultipro.com", "ukg.com", "ukg.net"),
+        "Multi-step; sign in or continue as guest.",
+    ),
+    ATS("paylocity", "Paylocity", ("paylocity.com",), "Single long form with screening questions."),
+    ATS("dayforce", "Dayforce", ("dayforcehcm.com",), "Candidate account and multi-step form."),
+    ATS("jazzhr", "JazzHR", ("applytojob.com",), "Single-page form."),
+    ATS("breezy", "Breezy HR", ("breezy.hr",), "Single-page form."),
+    ATS("recruitee", "Recruitee", ("recruitee.com",), "Single-page form."),
+    ATS("teamtailor", "Teamtailor", ("teamtailor.com",), "Single-page form, sometimes with email code."),
+    ATS("personio", "Personio", ("personio.de", "personio.com"), "Single-page form."),
+    ATS("rippling", "Rippling", ("rippling.com", "rippling-ats.com"), "Single-page form."),
 ]
+
+# Company career sites often embed or link to the real ATS; the page reveals it.
+EMBED_JS = r"""() => {
+  const urls = [];
+  for (const f of document.querySelectorAll('iframe[src]')) urls.push(['frame', f.src]);
+  for (const a of document.querySelectorAll('a[href]')) {
+    const t = (a.innerText || a.getAttribute('aria-label') || '').trim();
+    if (/^apply|apply now|apply for/i.test(t)) urls.push(['apply', a.href]);
+  }
+  for (const s of document.querySelectorAll('script[src]')) urls.push(['script', s.src]);
+  return urls.slice(0, 400);
+}"""
+
+
+def detect_embedded(entries):
+    """Return (ats, url) for an embedded application frame or apply link to a known ATS."""
+    for kind in ("frame", "apply", "script"):
+        for k, url in entries:
+            if k != kind:
+                continue
+            ats = detect(url)
+            if ats.id == "custom":
+                continue
+            if kind == "script":
+                return ats.id, None
+            if kind == "frame" and not re.search(r"embed|job_app|in_iframe|apply|jobs/\d|careers", url, re.I):
+                continue
+            return ats.id, url
+    return None, None
 
 
 def detect(url: str) -> ATS:

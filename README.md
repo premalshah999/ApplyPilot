@@ -2,6 +2,8 @@
 
 A self-hosted application workspace with a real browser worker, an evidence-backed answer engine, a fixed resume library, and a Telegram control channel.
 
+**Autonomous engine:** deterministic drivers for Workday, Oracle Recruiting, iCIMS, Taleo, SuccessFactors and other multi-page portals; one shared login per portal (created, verified and reset through your Gmail automatically); a knowledge base that learns from your Telegram answers. See [why the old engine failed and how this one works](docs/autonomous-engine.md).
+
 This replaces the previous ApplyPilot CLI. The old version is preserved on [`archive/pre-studio-2026-10-01`](https://github.com/premalshah999/ApplyPilot/tree/archive/pre-studio-2026-10-01). There is no Claude Code runtime dependency and no CV tailoring step.
 
 ![ApplyPilot dashboard](docs/dashboard.png)
@@ -44,6 +46,11 @@ MIMO_MODEL=mimo-v2.6-pro
 TELEGRAM_BOT_TOKEN=your-bot-token
 TELEGRAM_USER_ID=your-numeric-telegram-user-id
 CAPSOLVER_API_KEY=your-key
+# One login for every employer portal, plus Gmail for codes, links and password resets.
+ACCOUNT_EMAIL=you@gmail.com
+ACCOUNT_PASSWORD=Example!Passw0rd
+GMAIL_ADDRESS=you@gmail.com
+GMAIL_APP_PASSWORD=abcd efgh ijkl mnop
 ```
 
 ```bash
@@ -68,17 +75,20 @@ Required answers without adequate evidence go to the review inbox. After resolvi
 | Area | Behavior |
 | --- | --- |
 | Dashboard | Overview, job imports, classification, match approval, queue, receipts, screenshots, review inbox, resume uploads, profile facts, source schedules, controls |
-| Browser | Real Chromium, observed-control IDs, frame inspection, native controls, radio groups, ARIA comboboxes, file uploads, read-back verification, bounded navigation with Browser Use |
-| Fast path | Single-page forms on Greenhouse, Lever, Ashby, SmartRecruiters, Workable, and BambooHR can fill directly before invoking the navigation model |
-| Answers | Exact approved answers → identity facts → demographic decline → MiMo with evidence IDs; required unresolved answers stop for review |
+| Browser | Real Chromium, observed-control IDs, frames and open shadow roots, native and ARIA controls, Workday listbox buttons/prompts/date parts, Oracle pills, hidden selects behind select2/chosen, virtualized lists, read-back verification |
+| ATS adapters | Deterministic state machines for Workday, Oracle, iCIMS, Taleo, SuccessFactors, Eightfold and a generic multi-page driver: classify step → act → verify → repair flagged fields; navigation model only for unrecognized pages |
+| Fast path | Single-page forms on Greenhouse, Lever, Ashby, SmartRecruiters, Workable, and BambooHR fill directly before invoking the navigation model |
+| Answers | Exact approved answers → knowledge base → structured profile (names, address, phone, work/education rows) → screening facts → standard-consent policy → demographic decline → MiMo with resume, evidence and similar answers; unknown required questions go to Telegram |
+| Accounts | One `ACCOUNT_EMAIL`/`ACCOUNT_PASSWORD` for every portal: sign in, create on first use, verify by email, reset an old password through Gmail; password typed only on the employer or its ATS auth hosts |
 | Resumes | Select one existing PDF, freeze its checksum, verify attachment, retain a checksum in the receipt; never rewrite a CV |
 | Scheduling | Five-field cron per source, durable DBOS queues, three concurrent browsers by default, one application at a time per employer host |
 | Duplicate protection | Canonical job identity, atomic active-run checks, duplicate-delivery guards, uncertain-submission reconciliation, no blind resubmission |
 | Budgets | 100 submission reservations/day, 180-second active attempt budget, 18 model calls/run, $5 estimated model budget/day by default |
-| Telegram | `/status`, `/queue`, `/report`, `/pause`, `/resume`, `/apply URL`, `/answer REVIEW_ID ANSWER`, inline option reviews; numeric sender allowlist |
-| CapSolver | Optional, one supported reCAPTCHA v2 or Turnstile attempt/run; unsupported or unsuccessful challenges go to review |
-| Employer login | Local headed session capture or Playwright storage-state import for password/account flows |
-| Email verification | App-owned Gmail OAuth, encrypted tokens, employer rules, automatic dedicated email codes/links, redacted history ([setup](docs/email-verification.md)) |
+| Telegram | Questions arrive while the worker waits; reply to the message (or tap/number an option) and the run continues; answers are learned. `/status`, `/queue`, `/pause`, `/resume`, `/apply URL`, `/answer`, `/learn Q = A`, `/kb`, `/forget`, `/accounts`; numeric sender allowlist; jobs requeue automatically once answered |
+| CapSolver | reCAPTCHA v2/invisible/Enterprise/v3 and Turnstile detected from markup or iframe URLs, image captchas; bounded attempts per run |
+| Employer login | Automatic with the shared login; headed session capture only for SMS/passkey portals |
+| Email verification | Gmail app password over IMAP (or app-owned OAuth): built-in ATS sender rules, employer correlation, one-time consumption, codes and links never shown to the model ([details](docs/autonomous-engine.md), [OAuth setup](docs/email-verification.md)) |
+| Debugging | Per-step HTML + screenshot + decision trace; `jobpilot probe URL` (dry run with printed trace) and `jobpilot trace RUN_ID` |
 | MCP | Read-only stdio server for application/run/email status from coding assistants ([setup](docs/mcp.md)) |
 
 ## ATS coverage — read this before scaling
@@ -91,10 +101,11 @@ The system detects these ATS families and supplies navigation guidance to the sa
 | Lever | Public postings API | Browser + single-page fast path | Custom screening fields |
 | Ashby | Public job-board API | Browser + single-page fast path, dependent questions | Custom widgets |
 | SmartRecruiters | Public postings API | Hosted applicant page + fast path | Extra screening or account requirements |
-| Workday | Public CXS listing requests for conventional tenant/site URLs | Browser with imported employer session, multipage guidance | Password/account flows, employer-specific email templates, repeated experience forms, nonstandard tenants |
-| Oracle Recruiting | Import job URL or crawl public career-page links | Browser with Oracle HCM guidance | Employer-specific email flows, account/profile steps |
-| iCIMS | Import job URL or crawl public career-page links | Browser with frame and profile guidance | Employer login, unusual embedded forms |
-| Taleo | Import URL / public links | Browser with multipage guidance | Login and legacy controls |
+| Workday | Public CXS listing requests for conventional tenant/site URLs | Adapter: account create/verify/sign-in/reset, all wizard pages, rows, prompts, dates | Tenant-specific custom questions, SMS/passkey sign-in |
+| Oracle Recruiting | Import job URL or crawl public career-page links | Adapter: email + terms, emailed PIN, apply-flow sections, pills, e-signature | Tenant-specific sections such as mandatory experience rows |
+| iCIMS | Import job URL or crawl public career-page links | Adapter: in-frame content, email step, sign-in/create/reset, hidden selects | Auth0-style central logins, unusual embedded forms |
+| Taleo | Import URL / public links | Adapter: login/New User, privacy agreement, Save and Continue pages | Security questions on registration |
+| SuccessFactors / Eightfold | Import URL / public links | Adapter: account page, long form with "Apply" / resume-first form, email code | Tenant-specific widgets |
 | Workable / BambooHR | Import URL / public links | Browser + single-page fast path | Employer-specific controls |
 | Other sites | Import URL / public links | Observed-control browser fallback | Unsupported widgets or authentication |
 
@@ -144,15 +155,15 @@ On a machine with a visible display:
 uv run jobpilot login 'https://employer.wd5.myworkdayjobs.com/en-US/Careers'
 ```
 
-Sign in yourself, navigate to the application, then press Enter in the terminal. Studio stores only that employer's cookies and local storage in `.data/sessions`. For Docker, upload the generated `.json` file and the same employer URL under **Settings → Employer sessions**. Sessions are credentials: keep them private. Expired cookies, MFA, cross-domain authentication, and employer-specific verification can still require another capture.
+This is only needed for portals that use SMS, authenticator apps or passkeys; ordinary email/password portals are handled with `ACCOUNT_EMAIL`/`ACCOUNT_PASSWORD`. Sign in yourself, navigate to the application, then press Enter in the terminal. Studio stores only that employer's cookies and local storage in `.data/sessions`. For Docker, upload the generated `.json` file and the same employer URL under **Settings → Employer sessions**. Sessions are credentials: keep them private. Expired cookies, MFA, cross-domain authentication, and employer-specific verification can still require another capture.
 
-For email OTPs and verification links, configure **Settings → Email verification** using the [Gmail setup guide](docs/email-verification.md). This requires Google OAuth credentials in addition to the other provider keys. Automatic password/account creation and SMS verification remain unsupported.
+For email OTPs and verification links, set `GMAIL_ADDRESS` and `GMAIL_APP_PASSWORD` (Gmail app password with IMAP enabled), or use the OAuth connection in [the Gmail setup guide](docs/email-verification.md). SMS verification remains unsupported.
 
 ## Answer policy
 
 Demographic fields select a listed decline option when available. Missing decline options on required fields go to review.
 
-Disclosure facts and consent commitments are different. Supply accurate facts for convictions, government employment, NDA restrictions, referrals, sponsorship, and work authorization. The engine does not convert all such questions to “No”: negation, time scope, public-university employment, and promises to follow anti-corruption policies can change the answer. Approve exact consent labels or resolve the question in the review inbox.
+Disclosure facts and consent commitments are different. Supply accurate facts for convictions, government employment, NDA restrictions, referrals, sponsorship, and work authorization. The engine does not convert all such questions to “No”: negation, time scope, public-university employment, and promises to follow anti-corruption policies can change the answer. Standard privacy/terms/accuracy-certification checkboxes are accepted automatically when *auto accept consents* is on (marketing and SMS opt-ins never are); approve other exact consent labels or answer them once on Telegram.
 
 Question reuse is scoped to the employer, normalized label, section, and exact option set. Model-generated answers must cite known fact/evidence IDs and choose a valid option. This prevents unsupported IDs and many guessing failures; it does not mathematically prove a model's interpretation. Audit representative answers before increasing volume.
 
@@ -166,7 +177,7 @@ When a worker is interrupted before submission, the run requires review. If inte
 
 See [architecture](docs/architecture.md), [operations](docs/operations.md), and [validation](docs/validation.md) for implementation and operating details.
 
-Gmail connection and dedicated email OTP/link verification are now implemented: see [email setup](docs/email-verification.md). The [MCP server](docs/mcp.md) provides read-only status tools for your coding assistant. The broader [unattended agent design](docs/unattended-agent.md) remains a proposal for richer answer decisions, account creation, education widgets, and resumable authentication; its acceptance scenarios are not claims of passing live ATS tests.
+The [autonomous engine](docs/autonomous-engine.md) implements account creation, mailbox verification, the learning knowledge base and the ATS adapters; it is tested against mock ATS sites, not live tenants. The [MCP server](docs/mcp.md) provides read-only status tools for your coding assistant. The earlier [unattended agent design](docs/unattended-agent.md) is kept for reference.
 
 ## Open source
 

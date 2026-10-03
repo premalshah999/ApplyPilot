@@ -1,12 +1,13 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from .db import Budget, Job, Resume, Review, Run, Setting, now, record
 from .schemas import Profile
 
 ACTIVE = {"queued", "running", "submitting"}
+RETRYABLE = {"needs_review", "timed_out", "failed"}
 TERMINAL = {
     "confirmed",
     "dry_run_passed",
@@ -15,6 +16,8 @@ TERMINAL = {
     "submission_unknown",
     "failed",
     "cancelled",
+    "already_applied",
+    "closed",
 }
 
 
@@ -22,11 +25,13 @@ class Service:
     def __init__(self, db, config):
         self.db, self.config = db, config
         self.dispatch = None
+        from .inbox import Inbox
         from .mail import MailService
 
         self.mail = MailService(db, config)
+        self.inbox = Inbox(self)
 
-    async def queue(self, job_id, mode="dry_run", resume_id=None):
+    async def queue(self, job_id, mode="dry_run", resume_id=None, retry=False):
         profile = Profile.model_validate(self.db.get_setting("profile", {}))
         with self.db.exclusive() as s:
             job = s.get(Job, job_id)
@@ -35,7 +40,7 @@ class Service:
             previous = list(s.scalars(select(Run).where(Run.job_id == job_id)))
             if any(x.state in ACTIVE for x in previous):
                 raise ValueError("This job already has an active run")
-            if any(x.state in {"confirmed", "submission_unknown"} for x in previous):
+            if any(x.state in {"confirmed", "submission_unknown", "already_applied"} for x in previous):
                 raise ValueError("This job is submitted or has an uncertain submission. Reconcile it first.")
             chosen = s.get(Resume, resume_id or job.resume_id or "")
             if not chosen:
@@ -50,7 +55,8 @@ class Service:
                 control = s.get(Setting, "control").value
                 if not control.get("auto_submit"):
                     raise ValueError("Enable automatic submission in Settings first")
-                if job.status != "ready":
+                # An automatic retry after answered questions keeps the original approval.
+                if job.status != "ready" and not (retry and job.status in RETRYABLE):
                     raise ValueError("Approve or classify this job before submission")
             packet_profile = profile.model_dump()
             if job.demo:
@@ -66,7 +72,12 @@ class Service:
                 job_id=job.id,
                 mode=mode,
                 resume_id=chosen.id,
-                packet={"profile": packet_profile, "resume_path": str(path), "resume_sha": chosen.sha256},
+                packet={
+                    "profile": packet_profile,
+                    "resume_path": str(path),
+                    "resume_sha": chosen.sha256,
+                    "resume_text": "" if job.demo else (chosen.text or "")[:16000],
+                },
             )
             s.add(run)
             s.flush()
@@ -113,7 +124,11 @@ class Service:
             run.finished_at, run.elapsed = now(), elapsed
             run.receipt = result.get("receipt", {})
             s.get(Job, run.job_id).status = state
+            known = {r.key for r in s.scalars(select(Review).where(Review.run_id == run_id))}
             for q in result.get("reviews", []):
+                # Questions asked live during the run are already persisted.
+                if q.get("key", "manual") in known and q.get("key") not in {"manual", "session"}:
+                    continue
                 s.add(
                     Review(
                         run_id=run_id,
@@ -139,7 +154,11 @@ class Service:
             if review.options and answer not in review.options:
                 raise ValueError("Choose an offered option")
             review.answer = answer
+            learn = None
             if review.key not in {"manual", "session"}:
+                run = s.get(Run, review.run_id)
+                job = s.get(Job, run.job_id) if run else None
+                learn = (review.question, answer, list(review.options), job.company if job else "")
                 item = s.get(Setting, "profile")
                 value = dict(item.value if item else {})
                 value["approved_answers"] = {**value.get("approved_answers", {}), review.key: answer}
@@ -147,7 +166,48 @@ class Service:
                     item.value = value
                 else:
                     s.add(Setting(key="profile", value=value))
-        return {"resolved": True, "message": "Answer saved. Requeue the job when all reviews are resolved."}
+        if learn:
+            from .knowledge import upsert
+
+            question, value, options, employer = learn
+            try:
+                upsert(self.db, question, value, options, employer, source="review")
+            except ValueError:
+                pass
+        message = "Answer saved to your knowledge base." + (
+            " The job will retry automatically." if self.config.auto_requeue else " Requeue the job."
+        )
+        return {"resolved": True, "message": message}
+
+    async def after_answer(self, review_id):
+        """Requeue a deferred job once every question it raised has an answer."""
+        if not self.config.auto_requeue:
+            return None
+        with self.db.session() as s:
+            review = s.get(Review, review_id)
+            run = s.get(Run, review.run_id) if review else None
+            if not run or run.state not in RETRYABLE:
+                return None
+            open_reviews = s.scalar(
+                select(func.count())
+                .select_from(Review)
+                .where(Review.run_id == run.id, Review.answer.is_(None))
+            )
+            if open_reviews:
+                return None
+            newer = s.scalar(select(Run.id).where(Run.job_id == run.job_id, Run.created_at > run.created_at))
+            if newer:
+                return None
+            job_id, mode, resume_id = run.job_id, run.mode, run.resume_id
+        try:
+            queued = await self.queue(job_id, mode, resume_id, retry=True)
+        except ValueError as exc:
+            self.db.event(run.id, "requeue_skipped", str(exc)[:300])
+            return None
+        self.db.event(
+            run.id, "requeued", "All questions answered; retrying automatically", {"run": queued["id"]}
+        )
+        return queued
 
     def reconcile(self, run_id, submitted, evidence):
         if not evidence.strip():

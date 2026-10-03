@@ -36,6 +36,58 @@ async def capture_session(config, url):
         print(f"Saved employer session for {host}. Requeue the application in Studio.")
 
 
+async def probe(config, url, company=""):
+    """Run one dry run outside the queue and print what each step saw. Nothing is submitted."""
+    from .db import Database, Resume, Run
+    from .discovery import add_job
+    from .schemas import JobInput
+    from .service import Service
+
+    db = Database(config.database_url)
+    service = Service(db, config)
+    with db.session() as s:
+        resume = s.query(Resume).filter(Resume.demo.is_(False)).first()
+        if not resume:
+            raise SystemExit("Upload a resume in the dashboard first")
+        resume_id = resume.id
+    job, _ = add_job(db, JobInput(url=url, company=company))
+    try:
+        run = await service.queue(job["id"], "dry_run", resume_id, retry=True)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
+    print(f"Run {run['id']} (dry run) on {job['ats']} ...")
+    await service.execute(run["id"])
+    with db.session() as s:
+        row = s.get(Run, run["id"])
+        print(f"Result: {row.state} - {row.reason} ({row.elapsed:.0f}s, {row.model_calls} model calls)")
+    print_trace(config, run["id"])
+
+
+def print_trace(config, run_id):
+    import json
+
+    folder = config.data_dir / "runs" / run_id / "steps"
+    if not folder.exists():
+        print("No step trace for this run (TRACE_STEPS=false or it ended before the first step).")
+        return
+    for path in sorted(folder.glob("*.json")):
+        step = json.loads(path.read_text())
+        print(f"\n[{step['n']:02d}] {step['step']}  {step['url']}")
+        if step["headings"]:
+            print("     headings: " + " | ".join(step["headings"][:4]))
+        for error in step["errors"][:4]:
+            print("     error:    " + error[:160])
+        for f in step["fields"][:40]:
+            mark = "*" if f["required"] else " "
+            state = "filled" if f["filled"] else "empty "
+            print(
+                f"     {mark} {state} {f['type']:<10} {f['label'][:70]}"
+                + (f"  [{f['group']}]" if f.get("group") else "")
+            )
+        print("     controls: " + ", ".join(c["label"] for c in step["controls"][:14]))
+    print(f"\nSnapshots (HTML + screenshots): {folder}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="ApplyPilot Studio")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -43,7 +95,14 @@ def main():
     server.add_argument("--host", default="127.0.0.1")
     server.add_argument("--port", type=int, default=8080)
     sub.add_parser("token", help="Print this installation's dashboard access token")
-    sub.add_parser("doctor", help="Check local configuration without contacting providers")
+    doctor = sub.add_parser("doctor", help="Check local configuration")
+    doctor.add_argument("--check-mail", action="store_true", help="Log in to Gmail over IMAP once")
+    probe = sub.add_parser("probe", help="Dry-run one job URL and print the step trace (never submits)")
+    probe.add_argument("url")
+    probe.add_argument("--headed", action="store_true", help="Show the browser window (needs a display)")
+    probe.add_argument("--company", default="")
+    trace = sub.add_parser("trace", help="Summarize the step trace of a run")
+    trace.add_argument("run_id")
     sub.add_parser("mcp", help="Serve read-only application tools over MCP stdio")
     verify = sub.add_parser(
         "verify", help="Exercise the running installation with two synthetic browser runs"
@@ -71,6 +130,12 @@ def main():
         uvicorn.run(create_app(config), host=args.host, port=args.port, log_level="warning")
     elif args.command == "login":
         asyncio.run(capture_session(config, args.url))
+    elif args.command == "probe":
+        if args.headed:
+            config.headless = False
+        asyncio.run(probe(config, args.url, args.company))
+    elif args.command == "trace":
+        print_trace(config, args.run_id)
     elif args.command == "verify":
         import sys
 
@@ -106,9 +171,26 @@ def main():
             ("MiMo", bool(config.mimo_api_key)),
             ("Telegram", bool(config.telegram_bot_token and config.telegram_user_id)),
             ("CapSolver (optional)", bool(config.capsolver_api_key)),
+            ("Gmail app password (OTP/links)", bool(config.gmail_address and config.gmail_app_password)),
             ("Gmail OAuth (optional)", bool(config.google_client_id and config.google_client_secret)),
+            ("Employer account password", bool(config.account_password)),
         ]:
             print(f"{'READY' if ready else 'MISSING':7} {label}")
+        from .config import password_problems
+
+        if config.account_password and (problems := password_problems(config.account_password)):
+            print("WARN    ACCOUNT_PASSWORD: " + "; ".join(problems))
+        print(f"        Account email: {config.login_email or '(profile email)'} · engine: {config.engine}")
+        if args.check_mail and config.gmail_address and config.gmail_app_password:
+            from .inbox import IMAPBackend
+
+            try:
+                info = IMAPBackend(config).check()
+                print(f"READY   IMAP login to {info['host']} ({info['folder']})")
+            except Exception as exc:
+                print(
+                    f"FAIL    IMAP login: {type(exc).__name__}. Check the app password and that IMAP is enabled."
+                )
         print(
             f"{config.workers} workers · {config.application_timeout}s budget · {config.daily_application_limit} submissions/day"
         )

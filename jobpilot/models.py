@@ -28,6 +28,9 @@ class MeteredTransport(httpx.AsyncBaseTransport):
             args["response_format"] = {"type": "json_object"}
         args.pop("reasoning_effort", None)
         args.pop("frequency_penalty", None)
+        # Thinking is on by default for MiMo v2.6 and shares the completion budget with the JSON.
+        if self.config.mimo_thinking in {"enabled", "disabled"}:
+            args.setdefault("thinking", {"type": self.config.mimo_thinking})
         max_tokens = args.pop("max_tokens", 2400)
         args.setdefault("max_completion_tokens", max_tokens)
         body = json.dumps(args).encode()
@@ -82,7 +85,7 @@ def http_client(db, config, run_id=None):
     return httpx.AsyncClient(transport=MeteredTransport(db, config, run_id), timeout=25)
 
 
-async def structured(config, db, output_type, instructions, prompt, run_id=None):
+async def structured(config, db, output_type, instructions, prompt, run_id=None, max_tokens=2400):
     if not config.mimo_api_key:
         raise RuntimeError("MiMo is not configured. Add MIMO_API_KEY to .env and restart.")
     from openai import AsyncOpenAI
@@ -100,7 +103,7 @@ async def structured(config, db, output_type, instructions, prompt, run_id=None)
             output_type=PromptedOutput(output_type),
             instructions=instructions,
             retries=1,
-            model_settings={"temperature": 0.1, "max_tokens": 2400, "timeout": 25},
+            model_settings={"temperature": 0.1, "max_tokens": max_tokens, "timeout": 25},
         )
         result = await agent.run(prompt)
         return result.output
