@@ -25,11 +25,15 @@ def trusted_sender(domain, job):
 
     if sender_allowed(domain, RECEIPT_SENDERS, tenant_tokens(job.get("url", ""), job.get("company", "")), True):
         return True
-    # The employer's own domain: "zip.co" for Zip Co, "myfundedfutures.com" for My Funded Futures.
-    labels = domain.split(".")
-    name = labels[-3] if len(labels) >= 3 and labels[-2] in {"co", "com", "org", "net"} else labels[-2] if len(labels) >= 2 else ""
-    company = re.sub(r"[^a-z0-9]", "", (job.get("company") or "").casefold())
-    return len(name) >= 3 and len(company) >= 3 and (company.startswith(name) or name.startswith(company))
+    # The employer's own domain, by exact name: "zip.co" for Zip Co ("zip"), "ramp.com" for Ramp.
+    # Prefix look-alikes ("ziprecruiter.com", "stripe-careers-notify.com") are not the employer.
+    from .mail import employer_label
+
+    name = employer_label(domain)
+    words = [w for w in re.split(r"[^a-z0-9]+", (job.get("company") or "").casefold()) if w]
+    compact = "".join(words)
+    first = words[0] if words else ""
+    return len(name) >= 3 and name in {compact, first, compact.removesuffix("co"), compact.removesuffix("inc")}
 
 
 def acknowledgement(message, job, run, allow_missing_title=False):
@@ -127,7 +131,9 @@ async def check_receipts(mail, run_id=None):
         candidates = [
             (record(r), record(j))
             for r, j in s.execute(query)
-            if not r.receipt.get("email") and r.state in {"confirmed", "submission_unknown"}
+            # Done once a trusted acknowledgement is recorded (legacy email receipts were trusted).
+            if not (r.receipt.get("email") and r.receipt["email"].get("sender_trusted", True))
+            and r.state in {"confirmed", "submission_unknown"}
         ]
         boxes = {
             b.email.lower(): b.id for b in s.scalars(select(Mailbox).where(Mailbox.state == "connected"))
@@ -159,15 +165,22 @@ async def check_receipts(mail, run_id=None):
         for m in listed.get("messages", []):
             msg = await mail.request(boxes[recipient], "/messages/" + m["id"], {"format": "full"})
             if receipt := acknowledgement(msg, job, run, allow_missing_title=len(same_company_jobs) == 1):
+                if not receipt["sender_trusted"]:
+                    # Kept as context only; keep looking for the employer's own acknowledgement.
+                    with mail.db.exclusive() as s:
+                        row = s.get(Run, run["id"])
+                        if not row.receipt.get("email_untrusted"):
+                            row.receipt = {**row.receipt, "email_untrusted": receipt}
+                    continue
                 with mail.db.exclusive() as s:
                     row = s.get(Run, run["id"])
                     row.receipt = {
                         **row.receipt,
                         "email": receipt,
-                        "email_confirmed": receipt["sender_trusted"],
+                        "email_confirmed": True,
                         "website_confirmed": bool(row.receipt.get("website_confirmed")),
                     }
-                    if row.state == "submission_unknown" and receipt["sender_trusted"]:
+                    if row.state == "submission_unknown":
                         row.state = "confirmed"
                         row.reason = "Submission confirmed by authenticated employer acknowledgement email"
                         s.get(Job, row.job_id).status = "confirmed"
