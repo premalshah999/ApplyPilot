@@ -262,12 +262,31 @@ def save(db, question, answer, options=(), employer="", scope=None, review_id=No
     with db.exclusive() as s:
         row = s.get(Setting, "profile")
         value = dict(row.value if row else {})
+        replaced = [a for a in value.get("reviewed_answers", []) if same(a)]
         value["reviewed_answers"] = [a for a in value.get("reviewed_answers", []) if not same(a)] + [entry]
+        retire(s, value, replaced)
         if row:
             row.value = value
         else:
             s.add(Setting(key="profile", value=value))
     return entry
+
+
+def retire(s, value, entries):
+    """A corrected or forgotten answer must lose everywhere: drop the exact-question answer its
+    review left in approved_answers, and remember the review so it is never migrated back."""
+    from .db import Review
+
+    approved = dict(value.get("approved_answers", {}))
+    forgotten = list(value.get("forgotten_answers", []))
+    for entry in entries:
+        review = s.get(Review, entry["id"])
+        if review and approved.get(review.key) == review.answer:
+            approved.pop(review.key, None)
+        if entry["id"] not in forgotten:
+            forgotten.append(entry["id"])
+    value["approved_answers"] = approved
+    value["forgotten_answers"] = forgotten[-2000:]
 
 
 def search(db, text="", limit=10):
@@ -297,6 +316,7 @@ def forget(db, entry_id):
         if len(kept) == len(answers):
             raise ValueError("Knowledge entry not found")
         value["reviewed_answers"] = kept
+        retire(s, value, [a for a in answers if a["id"] == entry_id])
         row.value = value
 
 

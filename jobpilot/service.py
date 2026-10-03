@@ -55,13 +55,17 @@ class Service:
             raise ValueError("This employer rejected an application as possible spam. Applications there are paused for six hours; other employers can continue.")
 
     def migrate_reviewed_answers(self):
-        """Give existing applicant reviews provenance without changing their answers."""
+        """Give existing applicant reviews provenance without changing their answers.
+
+        Runs once per database: afterwards the reviewed answers are the store, and answers you
+        corrected or forgot must not come back from old review rows."""
         with self.db.exclusive() as s:
             item = s.get(Setting, "profile")
-            if not item:
+            if not item or s.get(Setting, "migrated:reviewed_answers"):
                 return
             value = dict(item.value)
             learned = {a["id"]: a for a in value.get("reviewed_answers", [])}
+            forgotten = set(value.get("forgotten_answers", []))
             for review, job in s.execute(
                 select(Review, Job)
                 .join(Run, Review.run_id == Run.id)
@@ -71,6 +75,7 @@ class Service:
                 # Only migrate actual answers which are still in the approved answer store.
                 if (
                     review.id not in learned
+                    and review.id not in forgotten
                     and review.key not in {"manual", "session"}
                     and value.get("approved_answers", {}).get(review.key) == review.answer
                 ):
@@ -79,6 +84,7 @@ class Service:
                     )
             value["reviewed_answers"] = list(learned.values())
             item.value = value
+            s.add(Setting(key="migrated:reviewed_answers", value={"at": now()}))
 
     def migrate_legacy(self):
         """One-way, idempotent import of data written by the earlier adapter branch.
@@ -272,9 +278,9 @@ class Service:
             # Questions already asked live during the run (Telegram) are persisted; never duplicate.
             known = {
                 r.key
-                for r in s.scalars(select(Review).where(Review.run_id == run_id))
+                for r in s.scalars(select(Review).where(Review.run_id == run_id, Review.answer.is_(None)))
                 if r.key not in {"manual", "session"}
-            }
+            }  # An answered question that is still missing is asked again, so the run can resume.
             for q in result.get("reviews", []) if state in {"needs_review", "waiting_answer"} else []:
                 if q.get("key", "manual") in known:
                     continue

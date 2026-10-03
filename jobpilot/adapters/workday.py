@@ -7,6 +7,8 @@ dateInputWrapper, file-upload-input-ref), plus visible headings as a fallback.""
 
 import re
 
+from playwright.async_api import Error as PlaywrightError
+
 from .base import CHECK_EMAIL, CONFIRM_TEXT, Adapter, Step
 
 STEP_PAGES = {
@@ -112,7 +114,10 @@ class Workday(Adapter):
         if self.attempts["workday_auth"] > 2:
             return self.defer("Workday kept returning to account access")
         try:
-            ok = await auth.run()
+            try:
+                ok = await auth.run()
+            except PlaywrightError:
+                raise ValueError("Workday account step did not respond as expected") from None
         except ValueError as exc:
             state = "waiting_browser" if self.config.browser_cdp_url else "needs_review"
             return {"state": state, "reason": str(exc)[:400], "reviews": []}

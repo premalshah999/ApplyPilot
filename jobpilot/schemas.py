@@ -109,8 +109,10 @@ class Profile(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def migrate_address_facts(cls, data):
-        """Confirmed address facts fill the structured address; existing structured values win."""
-        if not isinstance(data, dict):
+        """A profile saved before the structured address existed gets one from its address facts.
+
+        Once a profile has an address, edits are kept in sync on save (api.sync_address)."""
+        if not isinstance(data, dict) or "address" in data:
             return data
         facts = data.get("facts") or {}
         address = dict(data.get("address") or {})

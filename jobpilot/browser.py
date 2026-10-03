@@ -22,7 +22,7 @@ from .mail import origin
 from .network import public_url
 from .schemas import Profile
 from .accounts import AccountFlow
-from .capsolver import CaptchaSolver, challenge_frame
+from .capsolver import CaptchaSolver, challenge_frame, checkbox_frame
 from .privacy import deny_location
 
 GUARD = r"""(() => {
@@ -332,9 +332,19 @@ class BrowserEngine:
                     if ats == "workday":
                         from .workday import WorkdayAuth
 
+                        # With structured work history the adapter enters it exactly; otherwise
+                        # Workday parses the resume (main's choice).
+                        self.workday_method = (
+                            "Apply Manually" if adapters and self.profile.work else "Autofill with Resume"
+                        )
                         self.workday_auth = WorkdayAuth(self)
                         try:
-                            self.workday_session_ok = await self.workday_auth.run()
+                            try:
+                                self.workday_session_ok = await self.workday_auth.run()
+                            except PlaywrightError:
+                                # A control that never appeared: keep the tab for you, never a
+                                # bare worker error.
+                                raise ValueError("Workday account step did not respond as expected") from None
                         except ValueError as exc:
                             if not external or "service interruption" in str(exc):
                                 raise
@@ -755,11 +765,11 @@ class BrowserEngine:
         if not hasattr(self, 'captcha'):
             return None
         await self.captcha.solve(self.page)
-        if await challenge_frame(self.page):
+        if await challenge_frame(self.page) or await checkbox_frame(self.page):
             # Some image challenges contain more than one round. Attempts are
             # bounded in the solver; polling never creates an unlimited paid loop.
             await self.captcha.solve(self.page)
-            if await challenge_frame(self.page):
+            if await challenge_frame(self.page) or await checkbox_frame(self.page):
                 reason = self.captcha.last_reason or 'Website security check was not accepted'
                 return {'state':'waiting_browser', 'reason':reason + '. The employer page remains open in Chrome.'}
         return None

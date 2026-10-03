@@ -138,6 +138,26 @@ async def challenge_frame(page):
     return None
 
 
+async def checkbox_frame(page):
+    """A visible hCaptcha "I am human" checkbox whose response is still empty."""
+    for frame in page.frames:
+        if frame == page.main_frame or "hcaptcha" not in (frame.url or "") or "frame=checkbox" not in frame.url:
+            continue
+        try:
+            owner = await frame.frame_element()
+            if not await owner.is_visible():
+                continue
+            parent = await owner.evaluate_handle("e=>e.ownerDocument")
+            empty = await parent.evaluate(
+                "d=>[...d.querySelectorAll('[name=\"h-captcha-response\"]')].every(e=>!e.value)"
+            )
+            if empty:
+                return frame
+        except PlaywrightError:
+            continue
+    return None
+
+
 class CaptchaSolver:
     def __init__(self, config, emit):
         self.config, self.emit = config, emit
@@ -156,6 +176,23 @@ class CaptchaSolver:
 
     async def solve(self, page):
         challenge = await challenge_frame(page)
+        if not challenge and (box := await checkbox_frame(page)):
+            # A visible checkbox gates the step: open it once per page, then solve what it shows.
+            signature = ("checkbox", page.url.split("?")[0])
+            if self.attempts.get(signature, 0) < self.config.captcha_max_attempts:
+                self.attempts[signature] = self.attempts.get(signature, 0) + 1
+                try:
+                    await box.locator("#checkbox").click(timeout=3000)
+                except PlaywrightError:
+                    pass
+                for _ in range(12):
+                    await page.wait_for_timeout(250)
+                    if challenge := await challenge_frame(page):
+                        break
+                if not challenge and await self.token_present(page):
+                    self.last_reason = "Security checkbox accepted"
+                    self.emit("captcha", self.last_reason)
+                    return True
         if challenge and "hcaptcha" in challenge[2].lower():
             return await self.visual(page, *challenge[:2])
         for frame in page.frames:

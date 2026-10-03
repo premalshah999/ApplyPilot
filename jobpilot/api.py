@@ -51,6 +51,28 @@ class Reconcile(BaseModel):
     evidence: str = Field(min_length=5, max_length=4000)
 
 
+def trusted_email(receipt):
+    """A trusted acknowledgement email (receipts from before sender trust count as trusted)."""
+    email = receipt.get("email") or {}
+    return bool(receipt.get("email_confirmed") or (email and email.get("sender_trusted", True)))
+
+
+def sync_address(stored, value):
+    """Facts JSON and the structured address describe one address: whichever you edited wins."""
+    from .schemas import ADDRESS_FACTS
+
+    old_facts, old_address = stored.get("facts", {}) or {}, stored.get("address", {}) or {}
+    facts, address = dict(value.get("facts", {}) or {}), dict(value.get("address", {}) or {})
+    for key, attr in ADDRESS_FACTS.items():
+        if key not in facts and key not in old_facts:
+            continue
+        if facts.get(key) != old_facts.get(key):
+            address[attr] = "" if facts.get(key) is None else str(facts.get(key))
+        elif address.get(attr, "") != old_address.get(attr, "") and key in facts:
+            facts[key] = address.get(attr, "")
+    value["facts"], value["address"] = facts, address
+
+
 def create_app(config: Settings | None = None):
     config = config or settings()
     config.prepare()
@@ -238,7 +260,7 @@ def create_app(config: Settings | None = None):
                 "interventions_today": (interventions or 0)
                 + sum(r["state"] in {"waiting_browser", "waiting_answer"} for r in today),
                 "website_receipts_today": sum(bool(r["receipt"].get("website_confirmed")) for r in confirmed),
-                "email_receipts_today": sum(bool(r["receipt"].get("email_confirmed") or r["receipt"].get("email")) for r in confirmed),
+                "email_receipts_today": sum(trusted_email(r["receipt"]) for r in confirmed),
             },
             "config": {
                 "workers": config.workers,
@@ -269,19 +291,15 @@ def create_app(config: Settings | None = None):
             from .db import Setting
 
             row = s.get(Setting, "profile")
+            stored = dict(row.value) if row else {}
             # Keys this dashboard does not edit (or does not know yet) are kept, never dropped.
-            value = {**(row.value if row else {}), **data.model_dump()}
+            value = {**stored, **data.model_dump()}
             if row:
-                value["approved_answers"] = {
-                    **row.value.get("approved_answers", {}),
-                    **value["approved_answers"],
-                }
-                value["reviewed_answers"] = list(
-                    {
-                        a["id"]: a
-                        for a in [*value["reviewed_answers"], *row.value.get("reviewed_answers", [])]
-                    }.values()
-                )
+                # Learned answers are server-owned (reviews, Telegram, /api/knowledge): a stale
+                # dashboard copy can neither drop new answers nor restore corrected/forgotten ones.
+                for key in ("approved_answers", "reviewed_answers", "forgotten_answers"):
+                    value[key] = stored.get(key, {} if key == "approved_answers" else [])
+                sync_address(stored, value)
                 row.value = value
             else:
                 s.add(Setting(key="profile", value=value))

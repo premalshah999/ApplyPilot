@@ -409,6 +409,11 @@ class Adapter:
         for _ in range(self.max_steps):
             await self.form.settle(timeout=10)
             await self.dismiss_overlays()
+            if await self.captcha_open():
+                # An open challenge (e.g. hCaptcha after an email step) is solved before anything
+                # else; the scanner never shows CAPTCHA frames as fields or controls.
+                if challenge := await self.solve_captcha():
+                    return challenge
             obs = await self.form.scan()
             moved = self.handoff(obs["url"])
             if moved:
@@ -487,6 +492,8 @@ class Adapter:
         if not target:
             return {"fallback": True}
         await self.click(target, auth=True)
+        if challenge := await self.after_auth_click():
+            return challenge
         await self.after_auth_dialogs()
 
     async def after_auth_dialogs(self):
@@ -762,6 +769,21 @@ class Adapter:
         """None when the page is clear; a waiting_browser result when a check stays unsolved."""
         return await self.e.solve_captcha()
 
+    async def captcha_open(self):
+        from ..capsolver import challenge_frame, checkbox_frame
+
+        try:
+            return bool(await challenge_frame(self.page) or await checkbox_frame(self.page))
+        except Exception:
+            return False
+
+    async def after_auth_click(self):
+        """Security checks that appear right after an email/sign-in/create click."""
+        await asyncio.sleep(0.5)
+        if await self.captcha_open():
+            return await self.solve_captcha()
+        return None
+
     async def commit(self, final):
         if challenge := await self.solve_captcha():
             return challenge  # Unsolved check before anything was submitted.
@@ -1004,6 +1026,8 @@ class Adapter:
             # Saved before the click: the same shared login, so a crash cannot lose it.
             self.accounts.mark(url, "created_locally", credentials)
         await self.click(button, auth=True)
+        if challenge := await self.after_auth_click():
+            return challenge
         outcome, detail = await self.auth_outcome()
         self.emit("auth", f"{mode.replace('_', ' ')}: {outcome}")
         if outcome == "ok":
@@ -1154,6 +1178,8 @@ class Adapter:
         previous = self.accounts.saved(url)
         self.accounts.mark(url, "reset_requested", previous, reset_requested_at=time.time())
         await self.click(button, auth=True)
+        if challenge := await self.after_auth_click():
+            return challenge
         self.emit("auth", "Employer password reset requested")
         token = await self.wait_email("password_reset")
         if not token:

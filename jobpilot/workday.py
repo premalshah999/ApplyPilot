@@ -197,7 +197,7 @@ class WorkdayAuth:
         )
         return ready and not await page.locator('input[type="password"]:visible').count()
 
-    async def settle_after_auth(self, password, timeout=15):
+    async def settle_after_auth(self, password, timeout=15, previous=""):
         """Wait for the real outcome: the application form, an explicit error, or a verification
         message. A password field that disappears for a moment is not progress."""
         page = self.engine.page
@@ -206,8 +206,8 @@ class WorkdayAuth:
             await asyncio.sleep(0.25)
             if await self.form_ready():
                 return "ready"
-            if error := await self.auth_error():
-                return "error:" + error
+            if (error := await self.auth_error()) and error != previous:
+                return "error:" + error  # A new message, not the one shown before this click.
             visible = await password.count() and await password.is_visible()
             if not visible:
                 body = await page.locator("body").inner_text()
@@ -257,6 +257,29 @@ class WorkdayAuth:
             if hasattr(e.email_verification, "challenge_id"):
                 e.email_verification.challenge_id = None
         await page.goto(e.job["url"], wait_until="domcontentloaded", timeout=25000)
+
+    async def reverify(self):
+        """An account an earlier run left unverified: request a fresh email, then follow it."""
+        page = self.engine.page
+        resend = page.get_by_role("button", name=re.compile(r"resend|send (?:the )?(?:verification|email) again|verify (?:my )?email", re.I))
+        visible = [b for b in await resend.all() if await b.is_visible()]
+        if len(visible) == 1:
+            e = self.engine
+            rule = getattr(e.email_verification, "rule", None)
+            if not rule:
+                raise ValueError("Workday needs the account activation email; connect Gmail for this employer")
+            self.created_at = time.time() - 5
+            if getattr(e.email_verification, "challenge_id", None):
+                e.email_verification.close()
+            c = e.service.mail.begin(e.run_id, rule, e.form.resolver.profile.email, "link", self.created_at)
+            e.email_verification.challenge_id = c["id"]
+            await self.click(visible[0])
+            e.emit("account", "Requested a new Workday activation email")
+            await self.activate()
+            return
+        # Workday's reset email also proves the address; it sets the shared password too.
+        self.activated = True
+        await self.recover()
 
     def save_credentials(self, value, state, **extra):
         with self.engine.db.exclusive() as s:
@@ -405,7 +428,8 @@ class WorkdayAuth:
             cookie = page.get_by_role("button", name="Accept Cookies", exact=True)
             if await cookie.count() and await cookie.is_visible():
                 await self.click(cookie)
-            for name in ["Apply", "Continue Application", "Autofill with Resume", "Sign in with email"]:
+            method = getattr(e, "workday_method", "Autofill with Resume")
+            for name in ["Apply", "Continue Application", method, "Sign in with email"]:
                 button = page.get_by_role("button", name=name, exact=True)
                 if await button.count() == 1 and await button.is_visible():
                     await self.click(button)
@@ -431,7 +455,11 @@ class WorkdayAuth:
                             await asyncio.sleep(0.5)
                         continue
                     if UNVERIFIED.search(error) and not self.activated:
-                        await self.activate()
+                        if self.created_at is None:
+                            # Created by an earlier run: its activation email is old. Ask again.
+                            await self.reverify()
+                        else:
+                            await self.activate()
                         continue
                     if action == "sign_in" and WRONG.search(error):
                         if not self.recovery_attempted:
@@ -442,7 +470,10 @@ class WorkdayAuth:
                     if action == "create" and not error:
                         # Account created; Workday returned to Sign In (often pending activation).
                         self.save_credentials(stored or self.shared_credentials(), "verification_pending")
-                    elif not error:
+                    elif error:
+                        # A message none of the rules explain: never resubmit the same credentials.
+                        raise ValueError(f"Workday rejected the {action.replace('_', ' ')}: {error[:200]}")
+                    else:
                         unexplained += 1
                         if unexplained > 1:
                             raise ValueError(
@@ -481,6 +512,7 @@ class WorkdayAuth:
                     raise ValueError("Workday authentication control was not unique")
                 self.attempted = True
                 self.last_action = "create" if creating else "sign_in"
+                previous_error = await self.auth_error()
                 e.emit(
                     "account",
                     "Creating an employer account"
@@ -491,7 +523,7 @@ class WorkdayAuth:
                 if hasattr(e, 'browser_challenge') and (challenge := await e.browser_challenge()):
                     e.result = challenge
                     return False
-                outcome = await self.settle_after_auth(password)
+                outcome = await self.settle_after_auth(password, previous=previous_error)
                 self.report("create account" if creating else "sign in")
                 await self.clear()
                 observation = await e.form.scan()
@@ -505,7 +537,9 @@ class WorkdayAuth:
                     # Activation link: open it, then sign in (the account form returns).
                     await self.activate()
                     self.last_action = None
-                elif pending:
+                elif pending and not (await password.count() and await password.is_visible()):
+                    # A dedicated verification step only; while the sign-in form is still shown,
+                    # the next iteration reads its message first (unverified -> activation).
                     await e.email_verification.handle()
                     self.last_action = None
                 if outcome == "ready":

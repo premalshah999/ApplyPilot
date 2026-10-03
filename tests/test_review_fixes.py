@@ -1,6 +1,7 @@
 """Regressions for defects found by the adversarial review of the merge."""
 
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from jobpilot.adapters.base import Adapter, Step
@@ -173,3 +174,155 @@ async def test_an_expired_request_window_is_never_reused(service, prepared):
     assert new["id"] != old["id"] and new["kind"] == "password_reset"
     with service.db.session() as s:
         assert s.get(MailChallenge, old["id"]).state == "expired"
+
+
+async def test_adapter_solves_a_challenge_that_opens_after_the_email_step(service, page, tmp_path):
+    await page.set_content(
+        "<label>Email<input type=email></label><button type=button onclick=\"document.body.insertAdjacentHTML('beforeend',"
+        "'<iframe title=\\'hCaptcha challenge\\' srcdoc=\\'<p>Please click each image</p>\\' style=\\'width:400px;height:500px\\'></iframe>')\">Continue</button>"
+    )
+    engine = engine_for(service, page, tmp_path)
+    engine.solve_captcha = AsyncMock(return_value={"state": "waiting_browser", "reason": "check"})
+    adapter = Adapter(engine)
+    result = await adapter.on_email_entry(await adapter.form.scan())
+    assert result == {"state": "waiting_browser", "reason": "check"}
+    engine.solve_captcha.assert_awaited()
+
+
+async def test_visible_hcaptcha_checkbox_is_opened(page, config):
+    from jobpilot.capsolver import CaptchaSolver
+
+    await page.route("https://newassets.hcaptcha.com/**", lambda r: r.fulfill(content_type="text/html", body=(
+        "<div id=checkbox role=checkbox onclick=\"parent.postMessage('passed','*')\">I am human</div>")))
+    await page.set_content(
+        '<iframe src="https://newassets.hcaptcha.com/captcha/v1/x/static/hcaptcha.html#frame=checkbox" style="width:303px;height:78px"></iframe>'
+        "<textarea name=h-captcha-response></textarea>"
+        "<script>addEventListener('message',e=>{if(e.data==='passed')document.querySelector('textarea').value='P1_x'})</script>"
+    )
+    await page.frames[-1].wait_for_load_state()
+    solver = CaptchaSolver(config, lambda *a: None)
+    assert await solver.solve(page)
+    assert await page.locator("textarea").input_value() == "P1_x"
+
+
+def workday_engine(service, page, tmp_path, url):
+    profile = Profile(email=EMAIL, allow_account_creation=True)
+    f = FormSession(page, Resolver(profile, service.db, service.config), tmp_path / "r.pdf", lambda *a: None)
+    return SimpleNamespace(
+        job={"url": url}, page=page, form=f, db=service.db, service=service, config=service.config, run_id="r",
+        email_verification=SimpleNamespace(rule={"link_origins": [url.rsplit("/job", 1)[0]]}, challenge_id=None,
+                                           prepare_submission=AsyncMock(), state=lambda o: ("link", []),
+                                           handle=AsyncMock(side_effect=AssertionError("handled the sign-in form")),
+                                           close=lambda: None),
+        emit=lambda *a: None,
+    )
+
+
+SIGN_IN = """<h2>Sign In</h2><div data-automation-id=errorMessage role=alert hidden></div>
+<input data-automation-id=email><input type=password data-automation-id=password>
+<button data-automation-id=signInSubmitButton onclick="window.clicks=(window.clicks||0)+1;
+ const a=document.querySelector('[role=alert]');a.hidden=false;a.textContent=window.MESSAGE">Sign In</button>"""
+
+
+async def test_workday_unverified_sign_in_reverifies_instead_of_mixed_error(service, page, tmp_path, monkeypatch):
+    from jobpilot.accounts import AccountStore
+    from jobpilot.workday import WorkdayAuth
+
+    url = "https://acme.wd5.myworkdayjobs.com/External/job/X_R1"
+    await page.route("**/*", lambda r: r.fulfill(content_type="text/html", body=SIGN_IN))
+    await page.goto(url)
+    await page.evaluate("window.MESSAGE='Your account is not verified. Check your email for the verification link.'")
+    store = AccountStore(service, EMAIL)
+    store.save(url, store.shared(), "verification_pending")  # Left unverified by an earlier run.
+    auth = WorkdayAuth(workday_engine(service, page, tmp_path, url))
+    monkeypatch.setattr(auth, "recover", AsyncMock(side_effect=ValueError("recovery requested")))
+    try:
+        await auth.run()
+    except ValueError as exc:
+        assert "recovery requested" in str(exc)
+    auth.recover.assert_awaited_once()
+    assert await page.evaluate("window.clicks") == 1
+
+
+async def test_workday_unrecognised_error_is_not_resubmitted(service, page, tmp_path):
+    from jobpilot.accounts import AccountStore
+    from jobpilot.workday import WorkdayAuth
+
+    url = "https://acme.wd5.myworkdayjobs.com/External/job/X_R2"
+    await page.route("**/*", lambda r: r.fulfill(content_type="text/html", body=SIGN_IN))
+    await page.goto(url)
+    await page.evaluate("window.MESSAGE='Something unexpected happened. Error code 1234.'")
+    store = AccountStore(service, EMAIL)
+    store.save(url, store.shared(), "authenticated")
+    auth = WorkdayAuth(workday_engine(service, page, tmp_path, url))
+    try:
+        await auth.run()
+        raise AssertionError("expected a stop")
+    except ValueError as exc:
+        assert "Workday rejected the sign in" in str(exc)
+    assert await page.evaluate("window.clicks") == 1
+
+
+async def test_forgotten_or_corrected_answers_stay_gone(service, prepared):
+    from jobpilot.answers import answer_key
+    from jobpilot.db import Review
+    from jobpilot.knowledge import forget, save
+
+    service.db.set_setting("control", {"auto_submit": True, "paused": False})
+    job, _ = add_job(service.db, JobInput(url="https://example.test/job/kb-forget", company="Acme"))
+    run = await service.queue(job["id"], "dry_run", prepared["id"])
+    field = {"label": "Do you hold a security clearance?", "section": "", "options": ["Yes", "No"], "employer": "Acme"}
+    service.complete(run["id"], {"state": "needs_review", "reviews": [
+        {"question": field["label"], "options": field["options"], "key": answer_key(field)}]}, 1)
+    with service.db.session() as s:
+        review_id = s.query(Review).filter_by(run_id=run["id"]).one().id
+    service.answer_review(review_id, "Yes")
+    forget(service.db, review_id)
+    profile = service.db.get_setting("profile")
+    assert answer_key(field) not in profile["approved_answers"]
+    with service.db.exclusive() as s:
+        from jobpilot.db import Setting
+
+        if flag := s.get(Setting, "migrated:reviewed_answers"):
+            s.delete(flag)  # Even a forced re-migration must not bring it back.
+    service.migrate_reviewed_answers()
+    assert not [a for a in service.db.get_setting("profile")["reviewed_answers"] if a["id"] == review_id]
+    # A correction replaces it everywhere too.
+    save(service.db, field["label"], "No", field["options"], "Acme")
+    assert [a["answer"] for a in service.db.get_setting("profile")["reviewed_answers"]] == ["No"]
+
+
+async def test_answered_but_still_missing_question_is_asked_again(service, prepared):
+    from jobpilot.db import Review
+
+    job, _ = add_job(service.db, JobInput(url="https://example.test/job/re-ask", company="Acme"))
+    run = await service.queue(job["id"], "dry_run", prepared["id"])
+    with service.db.exclusive() as s:
+        s.add(Review(run_id=run["id"], question="Notice period?", options=[], key="k1", answer="2 weeks"))
+    service.complete(run["id"], {"state": "needs_review", "reviews": [{"question": "Notice period?", "options": [], "key": "k1"}]}, 1)
+    with service.db.session() as s:
+        rows = s.query(Review).filter_by(run_id=run["id"]).all()
+        assert sorted(r.answer is None for r in rows) == [False, True]  # Re-asked, not stuck.
+
+
+def test_changed_application_password_is_used_for_new_accounts(service):
+    from jobpilot.accounts import AccountStore
+
+    store = AccountStore(service, EMAIL)
+    generated = store.shared()
+    store.save("https://old.example.test", generated, "authenticated")
+    service.config.application_password = "Chosen!Pass9x"
+    assert store.shared()["password"] == "Chosen!Pass9x"
+    assert store.get("https://old.example.test")["password"] == generated["password"]  # Kept until reset.
+
+
+def test_address_facts_and_structured_address_stay_in_sync():
+    from jobpilot.api import sync_address
+
+    stored = {"facts": {"street_address": "1 Old St", "postal_code": "02139"}, "address": {"line1": "1 Old St", "postal_code": "02139"}}
+    edited_facts = {"facts": {"street_address": "9 New Ave", "postal_code": "02139"}, "address": dict(stored["address"])}
+    sync_address(stored, edited_facts)
+    assert edited_facts["address"]["line1"] == "9 New Ave"
+    edited_address = {"facts": dict(stored["facts"]), "address": {"line1": "5 Other Rd", "postal_code": "02139"}}
+    sync_address(stored, edited_address)
+    assert edited_address["facts"]["street_address"] == "5 Other Rd"

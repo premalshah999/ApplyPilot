@@ -262,10 +262,14 @@ def test_resolver_screening_intents_negation_and_source(config, service):
 
 
 def test_address_facts_migrate_into_the_structured_address():
+    # A profile saved before the structured address existed (main's profiles) gets one once.
     p = Profile.model_validate({"facts": {"street_address": "1 Main St", "zip_code": "10001", "city": "New York"},
-                                "address": {"city": "Brooklyn"}, "unknown_future_key": {"kept": True}})
-    assert (p.address.line1, p.address.postal_code, p.address.city) == ("1 Main St", "10001", "Brooklyn")
+                                "unknown_future_key": {"kept": True}})
+    assert (p.address.line1, p.address.postal_code, p.address.city) == ("1 Main St", "10001", "New York")
     assert p.model_dump()["unknown_future_key"] == {"kept": True}
+    # Afterwards the stored address is authoritative (saves keep facts and address in sync).
+    kept = Profile.model_validate({"facts": {"street_address": "1 Main St"}, "address": {"line1": "9 New Ave"}})
+    assert kept.address.line1 == "9 New Ave"
 
 
 async def test_invisible_recaptcha_and_turnstile_iframe_tasks(page, config, monkeypatch):

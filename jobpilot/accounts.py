@@ -17,11 +17,18 @@ class AccountStore:
 
     def shared(self):
         key = "application_credentials:" + hashlib.sha256(self.email.encode()).hexdigest()
+        configured = self.service.config.application_password
         with self.service.db.exclusive() as s:
             row = s.get(Setting, key)
             if row:
-                return self.service.mail.vault.open(row.value["credentials"])
-            password = self.service.config.application_password or ("Ap9!" + secrets.token_urlsafe(18))
+                value = self.service.mail.vault.open(row.value["credentials"])
+                if configured and value.get("password") != configured:
+                    # APPLICATION_PASSWORD/ACCOUNT_PASSWORD changed: new accounts and resets use it.
+                    # Each employer keeps its own saved password until its reset succeeds.
+                    value = {"email": self.email, "password": configured}
+                    row.value = {**row.value, "credentials": self.service.mail.vault.seal(value)}
+                return value
+            password = configured or ("Ap9!" + secrets.token_urlsafe(18))
             value = {"email": self.email, "password": password}
             s.add(Setting(key=key, value={"credentials": self.service.mail.vault.seal(value)}))
             return value
