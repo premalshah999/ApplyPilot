@@ -112,8 +112,13 @@
     }
     return [...new Set(out)].join(' ').slice(0, 300);
   };
-  const isReq = (el, q) => !!el.required || el.getAttribute('aria-required') === 'true' || /\*/.test(q);
-  const tidy = q => clean(q).replace(/\s*\*\s*$/, '').replace(/\s*\(?\brequired\)?\s*$/i, '').replace(/\s*\*\s*$/, '').trim();
+  // Required: the attribute, ARIA, a "*" or "✱" marker (Lever), or Ashby's required title class.
+  const ashbyRequired = el => {
+    const title = el.closest('.ashby-application-form-field-entry')?.querySelector('.ashby-application-form-question-title');
+    return !!title && /required/i.test(typeof title.className === 'string' ? title.className : '');
+  };
+  const isReq = (el, q) => !!el.required || el.getAttribute('aria-required') === 'true' || /[*✱]/.test(q) || ashbyRequired(el);
+  const tidy = q => clean(q).replace(/\s*[*✱]\s*$/, '').replace(/\s*\(?\brequired\)?\s*$/i, '').replace(/\s*[*✱]\s*$/, '').trim();
   const PLACEHOLDER_VALUE = /^(select( one)?|select\.\.\.|choose( one)?|choose\.\.\.|-+|--\s*select\s*--|please select|none selected)$/i;
 
   // Never applicant fields: inert/hidden subtrees, honeypots, CAPTCHA widgets and their responses.
@@ -164,7 +169,7 @@
     const value = parts.every(p => p.value) ? parts.map(p => p.kind === 'year' ? p.value.padStart(4, '0') : p.value.padStart(2, '0')).join('/') : '';
     const first = wrap.querySelector('input');
     const q = wrapperLabel(wrap) || label(first, { visibleFirst: true });
-    push(wrap, { label: q, type: 'date_parts', required: isReq(first, q) || /\*/.test(wrapperLabel(wrap)), value, parts,
+    push(wrap, { label: q, type: 'date_parts', required: isReq(first, q) || /[*✱]/.test(wrapperLabel(wrap)), value, parts,
       valid: first.getAttribute('aria-invalid') !== 'true', maxlength: -1 });
     consumed.add(wrap);
   }
@@ -177,7 +182,7 @@
     const ff = el.closest('[data-automation-id^="formField-"]') || el.parentElement;
     const chosen = [...(ff ? ff.querySelectorAll('[data-automation-id="selectedItem"]') : [])].map(x => clean(x.innerText)).filter(Boolean);
     const q = wrapperLabel(el) || (input ? label(input, { visibleFirst: true }) : label(el));
-    push(el, { label: q, type: 'prompt', required: (input && isReq(input, q)) || /\*/.test(q), value: chosen.join(', '),
+    push(el, { label: q, type: 'prompt', required: (input && isReq(input, q)) || /[*✱]/.test(q), value: chosen.join(', '),
       maxlength: -1, valid: !(input && input.getAttribute('aria-invalid') === 'true') });
     consumed.add(el);
   }
@@ -193,7 +198,7 @@
     const q = title ? clean(title.innerText) : label(box, { visibleFirst: true });
     const pressed = group.find(b => b.getAttribute('aria-pressed') === 'true');
     push(box, { label: q, type: 'buttonchoice', options: group.map(b => clean(b.innerText)),
-      required: /\*/.test(q) || !!(title && /required/i.test(title.className)),
+      required: /[*✱]/.test(q) || !!(title && /required/i.test(title.className)),
       value: pressed ? clean(pressed.innerText) : '', maxlength: -1, valid: true });
     consumed.add(box);
   }
@@ -210,7 +215,7 @@
     group.forEach(c => consumed.add(c));
     const parent = group[0].closest('.application-question,fieldset,[role=group]');
     const q = clean(parent?.querySelector('.application-label,legend')?.innerText || '') || label(group[0]) || name;
-    const req = group.some(c => c.required || c.getAttribute('aria-required') === 'true') || /\*/.test(q);
+    const req = group.some(c => c.required || c.getAttribute('aria-required') === 'true') || /[*✱]/.test(q);
     const value = group.filter(c => c.checked).map(c => label(c)).join('\n');
     push(group[0], { label: q, type: 'checkboxgroup', options: group.map(c => label(c)), required: req,
       value, maxlength: -1, valid: !req || !!value });
@@ -227,7 +232,7 @@
     pills.forEach(p => consumed.add(p));
     const q = label(container, { visibleFirst: true });
     const pressed = pills.find(p => p.getAttribute('aria-pressed') === 'true');
-    push(container, { label: q, type: 'pills', required: isReq(container, q) || /\*/.test(nearby(container)),
+    push(container, { label: q, type: 'pills', required: isReq(container, q) || /[*✱]/.test(nearby(container)),
       options: pills.map(p => clean(p.innerText)), value: pressed ? clean(pressed.innerText) : '', maxlength: -1, valid: true });
     consumed.add(container);
   }
@@ -241,7 +246,7 @@
     group.forEach(x => consumed.add(x));
     const q = label(container, { visibleFirst: true });
     const on = group.find(x => x.getAttribute('aria-checked') === 'true');
-    push(container, { label: q, type: 'radiogroup', required: isReq(container, q) || /\*/.test(q),
+    push(container, { label: q, type: 'radiogroup', required: isReq(container, q) || /[*✱]/.test(q),
       options: group.map(x => clean(x.innerText) || label(x)), value: on ? clean(on.innerText) || label(on) : '',
       maxlength: -1, valid: true });
     consumed.add(container);
@@ -290,8 +295,9 @@
       seen.add(key);
       const root = el.getRootNode();
       group = el.name ? [...root.querySelectorAll('input[type=radio]')].filter(x => x.name === el.name) : [el];
-      const parent = el.closest('fieldset,[role=radiogroup]');
-      question = parent ? (parent.querySelector('legend')?.innerText || label(parent)) : '';
+      // Lever wraps radios in .application-question with an .application-label (no fieldset).
+      const parent = el.closest('fieldset,[role=radiogroup],.application-question');
+      question = parent ? (parent.querySelector('legend,.application-label')?.innerText || label(parent)) : '';
       if (!question || question === 'Unlabelled field' || question === parent?.id) {
         question = wrapperLabel(el) || (parent && nearby(parent)) || nearby(el.parentElement || el) || el.name || label(el);
       }

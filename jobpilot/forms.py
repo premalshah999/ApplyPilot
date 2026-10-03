@@ -19,6 +19,7 @@ ENTRY = re.compile(
 )
 AUTH = re.compile(r"password|verification code|one.time|authentication code|security code", re.IGNORECASE)
 RESUME = re.compile(r"resume|cv\b|curriculum", re.IGNORECASE)
+AUTOFILL = re.compile(r"auto.?fill|autofill|parse your|pre.?fill", re.IGNORECASE)
 NOT_RESUME = re.compile(
     r"cover letter|transcript|portfolio|writing sample|certificat|reference", re.IGNORECASE
 )
@@ -109,6 +110,7 @@ class FormSession:
         self.upload_verified = False
         self.network = None
         self.accept_prefilled = False
+        self.resume_seen = False
 
     async def scan(self):
         self.fields, self.buttons, self.frames = {}, {}, {}
@@ -214,10 +216,20 @@ class FormSession:
         return False
 
     def resume_fields(self):
+        """The application's resume input. An input labelled by its own id/name/label wins over
+        one labelled from surrounding text; resume-parser "autofill" panes come last (Ashby puts
+        one before the real Resume field)."""
         files = [f for f in self.fields.values() if f["type"] == "file"]
         named = [f for f in files if RESUME.search(f["label"]) and not NOT_RESUME.search(f["label"])]
         if named:
-            return named[:1]
+
+            def rank(f):
+                own = RESUME.search(f.get("name", "")) or RESUME.search(
+                    f["label"].split(" (")[0]
+                )
+                return (bool(AUTOFILL.search(f["label"] + " " + f.get("name", ""))), not own)
+
+            return sorted(named, key=rank)[:1]
         unnamed = [f for f in files if not NOT_RESUME.search(f["label"])]
         return unnamed[:1] if len(files) == 1 else []
 
@@ -365,12 +377,15 @@ class FormSession:
             if candidates:
                 value = candidates[0]
                 exact = self.frames[field["id"]].get_by_role("option", name=value, exact=True)
-        if await exact.count():
+        try:
+            # Options often load after typing (Greenhouse school search): wait for the match.
+            await exact.first.wait_for(state="visible", timeout=5000)
             await exact.first.click(timeout=5000)
-        else:
+        except Exception:
+            await widgets.wait_options(self.frames[field["id"]], None, timeout=3.0, selector='[role="option"]')
             match = widgets.best_option([t.strip() for t in await options.all_text_contents()], value)
             if not match:
-                raise ValueError("Option is not offered")
+                raise ValueError("Option is not offered") from None
             await options.filter(has_text=re.compile("^" + re.escape(match) + "$")).first.click(timeout=5000)
             value = match
         return value
@@ -491,6 +506,8 @@ class FormSession:
                 self.uploaded = self.upload_verified = True
         # Upload first: parsing can overwrite fields and change the page.
         page_text = await self._page_text() if self.uploaded else ""
+        if self.resume_fields():
+            self.resume_seen = True  # This application asks for a resume somewhere.
         for field in self.resume_fields():
             if self.workday and self.uploaded and self.upload_verified:
                 continue
@@ -639,13 +656,22 @@ class FormSession:
                     problems.append(f"Value not accepted: {f['label']}")
             if f["type"] == "password" or AUTH.search(f["label"]):
                 continue
-            if f in self.resume_fields() or (f["type"] == "file" and RESUME.search(f["label"])):
+            if f in self.resume_fields():
                 if self.workday and self.uploaded and self.upload_verified:
                     continue
-                text = await self._page_text()
+                # The field's own value, or (for widgets that clear the input) the file listed on
+                # the page while this field is empty.
+                text = "" if f["value"] else await self._page_text()
                 self.upload_verified = self.resume_path.name in f["value"] or self.resume_path.name in text
                 if not self.upload_verified:
                     problems.append("Resume attachment was not accepted")
+                continue
+            if f["type"] == "file":
+                if f["required"] and not f["value"] and not RESUME.search(f["label"]):
+                    # A required document we cannot supply (e.g. a cover letter file): stop here.
+                    problems.append(f"Required document missing: {f['label']}")
+                    if not any(p.get("field_id") == f["id"] for p in self.pending):
+                        self._pending(f, "Required document upload")
                 continue
             empty = not f["value"] or (f["type"] == "checkbox" and f["value"] != "true")
             if f["required"] and f["type"] != "file" and (not f["valid"] or empty):
