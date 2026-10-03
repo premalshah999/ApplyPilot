@@ -274,6 +274,7 @@ class CaptchaSolver:
                     # A fresh capture prevents clicking on a replacement/expired puzzle.
                     self.last_reason = "Image challenge changed while the solver was working"
                     return False
+                puzzle["region"] = current[1]  # Measured now: the page may have scrolled.
                 answered.add(puzzle["hash"])
                 await self.act(page, puzzle, points)
                 button = frame.locator(".button-submit").filter(has_text=re.compile(r"^(Verify|Next|Submit)$", re.I))
@@ -344,17 +345,25 @@ class CaptchaSolver:
         }
 
     async def capture(self, page, owner, target):
-        """JPEG of the puzzle area and its page-coordinate region (CSS pixels)."""
+        """JPEG of the puzzle area and its viewport region (CSS pixels).
+
+        The image may be larger than the region (attached desktop Chrome on a Retina display
+        ignores scale="css"); coordinates are mapped by the measured image size. The puzzle is
+        scrolled into view first, and its box is read after the screenshot, so clicks never use
+        a box measured before the page scrolled."""
         try:
+            await owner.scroll_into_view_if_needed(timeout=2000)
             if target == "element":
                 frame = await owner.content_frame()
                 element = frame.locator("[data-jp-puzzle]").first
+                image = await element.screenshot(type="jpeg", quality=80, scale="css", timeout=3000)
                 region = await element.bounding_box()
                 if not region:
                     return None
-                image = await element.screenshot(type="jpeg", quality=80, scale="css", timeout=3000)
             else:
                 box = await owner.bounding_box()
+                if not box:
+                    return None
                 left, top = await owner.evaluate("e=>[e.clientLeft,e.clientTop]")
                 inner_w, inner_h = await owner.evaluate("e=>[e.clientWidth,e.clientHeight]")
                 # hCaptcha's last 90px hold refresh/skip/verify and accessibility controls, never answers.
