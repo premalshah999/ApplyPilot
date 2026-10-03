@@ -11,6 +11,27 @@ from sqlalchemy import select
 from .db import Job, Mailbox, Run, record
 
 
+# Senders that deliver ATS acknowledgements; employers' own domains are accepted by identity.
+RECEIPT_SENDERS = [
+    "greenhouse.io", "greenhouse-mail.io", "lever.co", "ashbyhq.com", "smartrecruiters.com",
+    "workablemail.com", "workable.com", "bamboohr.com", "jobvite.com", "myworkday.com", "workday.com",
+    "icims.com", "oraclecloud.com", "oracle.com", "taleo.net", "successfactors.com", "sapsf.com",
+    "eightfold.ai", "avature.net", "phenompeople.com", "rippling.com", "breezy.hr", "recruitee.com",
+]
+
+
+def trusted_sender(domain, job):
+    from .mail import sender_allowed, tenant_tokens
+
+    if sender_allowed(domain, RECEIPT_SENDERS, tenant_tokens(job.get("url", ""), job.get("company", "")), True):
+        return True
+    # The employer's own domain: "zip.co" for Zip Co, "myfundedfutures.com" for My Funded Futures.
+    labels = domain.split(".")
+    name = labels[-3] if len(labels) >= 3 and labels[-2] in {"co", "com", "org", "net"} else labels[-2] if len(labels) >= 2 else ""
+    company = re.sub(r"[^a-z0-9]", "", (job.get("company") or "").casefold())
+    return len(name) >= 3 and len(company) >= 3 and (company.startswith(name) or name.startswith(company))
+
+
 def acknowledgement(message, job, run, allow_missing_title=False):
     headers = {}
     for h in message.get("payload", {}).get("headers", []):
@@ -31,6 +52,7 @@ def acknowledgement(message, job, run, allow_missing_title=False):
         r"header\.from=" + re.escape(domain) + r"(?:\s|;|$)", auth, re.I
     ):
         return None
+    trusted = trusted_sender(domain, job)
     recipient = run["packet"]["profile"]["email"].lower()
     if recipient not in {
         a.lower() for _, a in getaddresses(headers.get("to", []) + headers.get("delivered-to", []))
@@ -75,6 +97,9 @@ def acknowledgement(message, job, run, allow_missing_title=False):
         return None
     return {
         "message_id": message["id"],
+        # Authenticated is not enough to confirm a submission: the sender must also be this
+        # employer or an ATS that sends on its behalf.
+        "sender_trusted": trusted,
         "from": sender[0][1],
         "subject": subject,
         "received_at": datetime.fromtimestamp(int(message["internalDate"]) / 1000, UTC).isoformat(),
@@ -136,8 +161,13 @@ async def check_receipts(mail, run_id=None):
             if receipt := acknowledgement(msg, job, run, allow_missing_title=len(same_company_jobs) == 1):
                 with mail.db.exclusive() as s:
                     row = s.get(Run, run["id"])
-                    row.receipt = {**row.receipt, "email": receipt}
-                    if row.state == "submission_unknown":
+                    row.receipt = {
+                        **row.receipt,
+                        "email": receipt,
+                        "email_confirmed": receipt["sender_trusted"],
+                        "website_confirmed": bool(row.receipt.get("website_confirmed")),
+                    }
+                    if row.state == "submission_unknown" and receipt["sender_trusted"]:
                         row.state = "confirmed"
                         row.reason = "Submission confirmed by authenticated employer acknowledgement email"
                         s.get(Job, row.job_id).status = "confirmed"

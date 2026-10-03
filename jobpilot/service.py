@@ -237,7 +237,14 @@ class Service:
                     )
             if state not in TERMINAL:
                 state = "failed"
-            rejected = result.get("receipt", {}).get("type") == "explicit_rejection_page"
+            evidence = result.get("receipt", {})
+            if state == "confirmed" and not (
+                evidence.get("type") in {"explicit_confirmation_page", "user_reconciled"} or evidence.get("email")
+            ):
+                # "Confirmed" needs a website confirmation, an employer email, or the applicant's word.
+                state = "submission_unknown" if run.state == "submitting" else "needs_review"
+                result = {**result, "reason": "No confirmation evidence was captured"}
+            rejected = evidence.get("type") == "explicit_rejection_page"
             if run.state == "submitting" and state not in {"confirmed", "submission_unknown"} and not rejected:
                 state = "submission_unknown"
             run.state, run.reason = state, result.get("reason", "")[:4000]
