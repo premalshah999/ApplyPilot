@@ -119,8 +119,8 @@ async def test_restart_during_final_submit_never_resubmits_and_email_can_confirm
     await check_receipts(service.mail, run["id"])
     with service.db.session() as s:
         row = s.get(Run, run["id"])
-        assert row.state == "submission_unknown" and row.receipt.get("email_confirmed") is False
-        row.receipt = {}
+        assert row.state == "submission_unknown" and not row.receipt.get("email_confirmed")
+        assert row.receipt["email_untrusted"]["sender_trusted"] is False and "email" not in row.receipt
     # The employer's own acknowledgement confirms it, as email evidence only.
     ack(gmail, "no-reply@example.test")
     await check_receipts(service.mail, run["id"])
