@@ -67,8 +67,8 @@ class Settings(BaseSettings):
     block_assets: bool = True
     # Save a DOM snapshot, screenshot and decision per wizard step under DATA_DIR/runs/<id>/steps.
     trace_steps: bool = True
-    # "adapters": deterministic ATS drivers for multi-page portals, the model only for answers.
-    # "agent": previous behavior for every non single-page form.
+    # "adapters": deterministic ATS drivers for multi-page portals, the model only for answers,
+    # falling back to the guided flow. "guided": main's guided flow for every site.
     engine: str = "adapters"
     enable_workers: bool = True
     enable_demo: bool = True

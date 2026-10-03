@@ -63,6 +63,17 @@ Open your configured bot in Telegram and press **Start**.
 
 The bot also answers questions about recent applications and sends a result after each run. It accepts messages only from the Telegram account saved in `.env`.
 
+## Workday, Oracle, iCIMS and other multi-page portals
+
+These portals use dedicated drivers (`ENGINE=adapters`, the default). Set `ENGINE=guided` in `.env` to use the previous guided flow for every site. Before enabling automatic submission for a new portal, try a dry run that never submits and read its step trace:
+
+```sh
+docker compose exec app jobpilot probe "JOB_URL" --company "Employer"
+docker compose exec app jobpilot trace RUN_ID
+```
+
+See [integration.md](integration.md) for what changed in this version and how runs are confirmed.
+
 ## Workday sign-in
 
 Workday may ask you to sign in again when its session expires. The app uses its saved account details and connected Gmail for supported account recovery. If it asks for help in Telegram, finish signing in in the open Chrome tab, then reply **done** to that message. Do not paste your Workday password into chat or `.env`. Employer outages and security challenges can still prevent an application.
@@ -73,7 +84,7 @@ Workday may ask you to sign in again when its session expires. The app uses its 
 - The application browser denies requests for your live location, including in new tabs.
 - CapSolver handles supported reCAPTCHA and Turnstile token challenges automatically.
 - For hCaptcha image puzzles, the optional `TWOCAPTCHA_API_KEY` enables a 2Captcha image-coordinate fallback. Only the isolated puzzle image is sent. Its success on an employer site must still be verified; it is not universal CAPTCHA support.
-- Solver calls stop after two attempts per challenge and 90 seconds per task by default. Configure `CAPTCHA_MAX_ATTEMPTS` and `CAPTCHA_TIMEOUT` in `.env` if needed. Restart the app after changing `.env`.
+- Solver calls stop after two attempts per challenge, four paid image rounds per application and 90 seconds per task by default. Configure `CAPTCHA_MAX_ATTEMPTS`, `CAPTCHA_MAX_ROUNDS` and `CAPTCHA_TIMEOUT` in `.env` if needed. Restart the app after changing `.env`.
 - Unfamiliar application sites use the same form and account detector. A new email sender can be learned automatically when a fresh, authenticated verification message links directly to that employer. Ambiguous messages still require help.
 
 ## Stop or update

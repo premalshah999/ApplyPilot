@@ -1,9 +1,11 @@
 # Autonomous engine: why Workday, Oracle and iCIMS failed, and what replaced it
 
 Status (2026-10-03): implemented and covered by end-to-end tests against high-fidelity **mock** ATS
-sites (`tests/mock_ats/`). It has **not** been run against live employer tenants from this
-environment (outbound access to ATS hosts is blocked here). Use `jobpilot probe URL` on your own
-machine to validate each tenant before turning on automatic submission, and send failing traces back.
+sites (`tests/mock_ats/`), then merged with `main` (see [integration.md](integration.md) for what
+changed, the trust rules, the migration note and the live-results table). It has **not** been run
+against live employer tenants from this environment (outbound access to ATS hosts is blocked here).
+Use `jobpilot probe URL` on your own machine to validate each tenant before turning on automatic
+submission, and send failing traces back.
 
 ## 1. Root causes in the previous engine
 
@@ -29,7 +31,8 @@ prompts:
 ```mermaid
 flowchart TD
   Q["DBOS queue (one run per employer host)"] --> E["BrowserEngine"]
-  E -->|Greenhouse / Ashby / Lever| F["Fast path, then navigation model (unchanged)"]
+  E -->|Greenhouse / Ashby / Lever| F["main's guided flow, then navigation model (unchanged)"]
+  E -->|Workday| W["WorkdayAuth (main): account, activation, reset"]
   E -->|everything else| D["Detect real ATS (redirects, embedded frames)"]
   D --> A["Adapter state machine"]
   A --> O["Observe: scan.js (frames, shadow DOM, custom widgets)"]
@@ -53,10 +56,10 @@ Code map:
 | `jobpilot/forms.py` | Fill loop: upload resume first, discover options, resolve, fill, re-scan for dependent fields (up to 3 rounds), drop questions that disappeared, verify. Network/busy-aware `settle()` instead of fixed sleeps. |
 | `jobpilot/answers.py` | Local answers before the model: knowledge base, structured profile (names, address parts, phone parts, work/education rows), screening intents mapped to your facts (authorization, sponsorship, age, prior employment, non-compete, relocation, salary, start date, referral source...), negation guard, standard-consent policy, demographic decline (including context from sibling checkboxes). The model gets the selected resume text, similar learned answers and the job description. |
 | `jobpilot/knowledge.py` | Learned answers: employer names normalized to a placeholder, option-compatible reuse, employer-scoped motivation prose, similar-question retrieval, live Telegram ask-and-wait. |
-| `jobpilot/inbox.py` | Gmail over IMAP with an app password (or the existing OAuth mailbox). Built-in sender families (Workday, Oracle, iCIMS, Taleo, SuccessFactors, Eightfold...), recipient/alias matching, link host must be this employer (a Globex link never opens for Acme), unnamed codes accepted only while the run holds that ATS's mail lock, every message consumed once. |
-| `jobpilot/accounts.py` | One email + password for every portal, per-tenant registry (unknown, created, verified, active, reset, locked), password typed only on the employer host or the ATS's own auth hosts. |
+| `jobpilot/mail.py` + `jobpilot/inbox.py` | `mail.py` (main's MailService) is the only mailbox reader: Google's receiving DMARC alignment, sender in the employer's rule (or an aligned subdomain / employer-owned domain for Oracle, iCIMS, Taleo...), exact recipient, request window, tenant identity, exactly one match, one-use consumption, codes sealed in the vault. `inbox.py` lets adapters open the request window before the site sends mail (shared-sender lease) and wait on it. |
+| `jobpilot/accounts.py` | main's encrypted `AccountStore` (one email + one shared password for every portal, generated once when `APPLICATION_PASSWORD` is unset) plus the adapter view: per-origin state (created_locally, verification_pending, authenticated, reset_requested, password_reset, exists, locked), password typed only on the employer host or the ATS's own auth hosts. |
 | `jobpilot/adapters/` | `base.py` generic multi-page driver; `workday.py`, `oracle.py`, `icims.py`, `others.py` (Taleo, SuccessFactors, Eightfold). Handoff when a career site moves to a known ATS. |
-| `jobpilot/capsolver.py` | reCAPTCHA v2/invisible/Enterprise/v3 and Turnstile from markup *or iframe URLs*, image captchas; tokens injected into every frame and the widget callback invoked. Visible challenges are solved when seen, invisible ones at commit. |
+| `jobpilot/capsolver.py` | main's `CaptchaSolver`: CapSolver token tasks (reCAPTCHA v2/invisible/Enterprise/v3 via hooks, Turnstile), ImageToText for classic text images, and 2Captcha `CoordinatesTask` for hCaptcha puzzles with a puzzle-only crop, separate instructions, pixel-ratio-safe coordinate mapping, per-round re-observation, stale-solution and out-of-bounds rejection, and acceptance only when the site closes the challenge with a token. |
 
 ### Account flow (same email + password everywhere)
 
