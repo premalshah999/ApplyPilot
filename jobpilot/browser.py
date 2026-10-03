@@ -43,6 +43,7 @@ GUARD = r"""(() => {
 
 # Already reliable with the single-page fast path + navigation model; keep their behavior.
 AGENT_FIRST = {"greenhouse", "ashby", "lever", "smartrecruiters", "workable", "bamboohr"}
+SENSITIVE_STEPS = {"sign_in", "create_account", "email_code", "verify_link", "reset_password", "email_entry"}
 # Multi-page portals get the longer budget whichever engine drives them.
 MULTIPAGE = {"workday", "oracle", "icims", "taleo", "successfactors", "eightfold", "avature", "jobvite", "custom"}
 FAST_PATH = {"greenhouse", "lever", "ashby", "smartrecruiters", "workable", "bamboohr"}
@@ -536,8 +537,15 @@ class BrowserEngine:
                 for b in obs["controls"][:80]
             ],
         }
+        # Account and verification steps can show passwords, codes or one-use link tokens:
+        # their summary is kept, never a screenshot or the page HTML.
+        sensitive = step in SENSITIVE_STEPS or any(
+            f["type"] == "password" or AUTH.search(f.get("label", "")) for f in obs["fields"]
+        )
         try:
             (folder / f"{name}.json").write_text(json.dumps(summary, indent=1))
+            if sensitive:
+                return
             page = self.form.page
             await page.screenshot(path=str(folder / f"{name}.jpg"), type="jpeg", quality=45, timeout=3000)
             html = await page.content()

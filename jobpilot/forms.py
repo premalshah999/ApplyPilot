@@ -155,6 +155,10 @@ class FormSession:
             meta["busy"] = meta["busy"] or data.get("busy", False)
             for kind in ("fields", "buttons"):
                 for item in data[kind]:
+                    if kind == "fields" and AUTH.search(item.get("label", "")) and item.get("value"):
+                        # Codes and passwords never leave the page through an observation (model
+                        # prompts, agent tools, traces); only that a value is present.
+                        item["value"] = "********"
                     item["employer"] = self.resolver.employer
                     item["dom_id"] = item["id"]
                     item["id"] = f"f{n}-{data['document_id']}-{item['id']}"
