@@ -127,7 +127,8 @@ class BrowserEngine:
                 await public_url(url, self.config.allow_private_urls)
                 self.dns_cache.add(p.hostname)
             host = p.hostname or ""
-            if self.config.block_assets and not self.job["demo"]:
+            # Your own desktop Chrome shows the page as-is (images, fonts, image CAPTCHAs).
+            if self.config.block_assets and not self.job["demo"] and not self.config.browser_cdp_url:
                 if request.resource_type in {"image", "media", "font"} and not host.endswith(CAPTCHA_HOSTS):
                     return await route.abort()
                 if host.endswith(TRACKERS) and not request.is_navigation_request():

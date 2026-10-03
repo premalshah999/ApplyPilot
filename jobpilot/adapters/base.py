@@ -180,7 +180,20 @@ class Adapter:
         self.e.emit(kind, message, data)
 
     def defer(self, reason, reviews=None, state="needs_review"):
-        return {"state": state, "reason": reason[:1000], "reviews": reviews or []}
+        reviews = reviews or []
+        if (
+            state == "needs_review"
+            and self.config.browser_cdp_url
+            and reviews
+            and all(r.get("key") in {"session", "manual"} for r in reviews)
+        ):
+            # With the desktop Chrome, a browser-fixable blocker keeps its tab open for you.
+            return {
+                "state": "waiting_browser",
+                "reason": reason[:900] + ". Finish this step in the open Chrome tab, then reply done in Telegram.",
+                "reviews": reviews,
+            }
+        return {"state": state, "reason": reason[:1000], "reviews": reviews}
 
     @staticmethod
     def prepare_url(url):
