@@ -79,31 +79,35 @@ export type EducationEntry = {
   end: string;
   gpa: string;
 };
-export type KnowledgeEntry = {
+// One learned answer: Profile.reviewed_answers items and /api/knowledge entries share this shape.
+export type ReviewedAnswer = {
   id: string;
   question: string;
   answer: string;
   options: string[];
-  scope: string;
-  source: string;
-  updated_at: string;
+  employer: string;
+  scope: "personal" | "employer";
+  layer: "fact" | "narrative";
 };
+export type AccountState =
+  | "created_locally"
+  | "signing_in"
+  | "authenticated"
+  | "verification_pending"
+  | "reset_requested"
+  | "password_reset"
+  | "exists"
+  | "locked";
 export type AccountRow = {
   id: string;
-  realm: string;
-  ats: string;
-  email: string;
-  state: string;
-  resets: number;
-  last_error: string;
+  origin: string;
+  state: AccountState | string;
   updated_at: string;
-  password_current: boolean;
+  reset_requested_at: number | null;
 };
 export type AccountSummary = {
-  email: string;
-  password_configured: boolean;
-  password_problems: string[];
   accounts: AccountRow[];
+  password_problems: string[];
 };
 export type Profile = {
   name: string;
@@ -124,10 +128,8 @@ export type Profile = {
   education: EducationEntry[];
   skills: string[];
   languages: string[];
-  referral_source: string;
   salary_expectation: string;
   availability: string;
-  auto_accept_consents: boolean;
   facts: Record<string, unknown>;
   evidence: { id: string; text: string }[];
   target_roles: string[];
@@ -137,6 +139,12 @@ export type Profile = {
   decline_demographics: boolean;
   approved_consents: string[];
   approved_answers: Record<string, string>;
+  reviewed_answers: ReviewedAnswer[];
+  application_source: string;
+  allow_account_creation: boolean;
+  allow_application_consents: boolean;
+  accept_all_application_terms: boolean;
+  autonomous: boolean;
 };
 export type Snapshot = {
   jobs: Job[];
@@ -170,8 +178,8 @@ export type Snapshot = {
     account: boolean;
     account_email: string;
     imap: boolean;
+    twocaptcha: boolean;
     telegram_wait: number;
-    auto_requeue: boolean;
   };
   ats: { id: string; name: string; tier: string; guidance: string }[];
 };

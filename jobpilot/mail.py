@@ -18,7 +18,7 @@ from cryptography.fernet import Fernet
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from .db import Mailbox, MailChallenge, MailConsumption, MailOAuth, MailRule, Run, now, record
+from .db import Job, Mailbox, MailChallenge, MailConsumption, MailOAuth, MailRule, Run, now, record
 from .network import public_url
 
 SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
@@ -42,6 +42,93 @@ def origin(url):
     return f"{p.scheme}://{host}" + (
         f":{port}" if port and port != (443 if p.scheme == "https" else 80) else ""
     )
+
+
+# Multi-tenant ATS sender domains. Mail from them is attributed to one employer only by tenant
+# identity (Workday names the tenant in the sender, e.g. mimecast@myworkday.com) or, when the
+# message names no tenant, by the shared-sender lease that begin() holds for one run at a time.
+TENANT_SENDERS = {"myworkday.com"}
+TENANT_SUFFIXES = ("oraclecloud.com", "icims.com", "taleo.net", "successfactors.com", "eightfold.ai")
+GENERIC_LOCAL = re.compile(
+    r"^(?:no-?reply|do-?not-?reply|donotreply|noreply\d*|notifications?|notify|mailer|info|support|"
+    r"careers?|jobs?|recruit(?:ing|ment|er)?s?|talent|hr|otp|workday|alerts?|system|admin|apply|"
+    r"candidates?|hello|team|accounts?|security|verify|verification)$"
+)
+GENERIC_LABELS = {
+    "www", "careers", "career", "jobs", "job", "apply", "recruiting", "external", "candidate",
+    "myworkdayjobs", "myworkdaysite", "myworkday", "workday", "oraclecloud", "oracle", "icims",
+    "taleo", "successfactors", "sapsf", "eightfold", "jobs2web", "com", "net", "org", "edu", "gov",
+    "hcmui", "candidateexperience", "sites", "inc", "corp", "corporation", "company", "group",
+    "holdings", "technologies", "technology", "solutions", "services", "international", "global",
+    "the", "and", "limited", "llc", "partners",
+}
+# Families whose verification mail often comes from the employer's own domain via the ATS.
+EMPLOYER_SENDER_FAMILIES = {
+    "oracle", "icims", "taleo", "successfactors", "eightfold", "smartrecruiters", "avature",
+    "jobvite", "phenom", "custom",
+}
+
+
+CODE_CUE = re.compile(r"verification code|security code|one.time|passcode|\bpin\b|\botp\b|\bcode\b", re.I)
+
+
+def tenant_tokens(url, company=""):
+    """Employer identity tokens from the job URL (tenant host/path) and the company name."""
+    p = urlsplit(url)
+    words = re.split(r"[^a-z0-9]+", (p.hostname or "").lower())
+    if re.search(r"myworkdaysite\.com$|myworkdayjobs\.com$", p.hostname or ""):
+        # wd1.myworkdaysite.com/recruiting/<tenant>/<site>
+        words += re.split(r"[^a-z0-9]+", p.path.lower())[:4]
+    words += re.split(r"[^a-z0-9]+", (company or "").lower())
+    out = []
+    for w in words:
+        if len(w) >= 4 and w not in GENERIC_LABELS and not re.fullmatch(r"wd\d+|fa|ocs|\d+", w):
+            if w not in out:
+                out.append(w)
+    return out[:6]
+
+
+def sender_allowed(domain, domains, tokens=(), employer_senders=False):
+    """Exact rule domain or its subdomain; with employer senders, a domain the employer owns."""
+    if any(domain == d or domain.endswith("." + d) for d in domains):
+        return True
+    if not employer_senders:
+        return False
+    labels = domain.split(".")
+    second = labels[-3] if len(labels) >= 3 and labels[-2] in {"co", "com", "org", "net"} else labels[-2] if len(labels) >= 2 else ""
+    return any(len(t) >= 4 and second.startswith(t) for t in tokens)
+
+
+def tenant_conflict(address, domain, tokens):
+    """True when a shared ATS sender visibly names a different tenant than this employer."""
+    if not tokens:
+        return False
+    local = address.rpartition("@")[0].lower().split("+")[0]
+    if domain in TENANT_SENDERS:
+        return not GENERIC_LOCAL.match(local) and not any(t in local for t in tokens)
+    for suffix in TENANT_SUFFIXES:
+        if domain.endswith("." + suffix):
+            labels = [x for x in domain[: -len(suffix) - 1].split(".") if x and x not in GENERIC_LABELS]
+            # Region/pod labels (us2, em3, eu1) are infrastructure, not tenants.
+            named = [x for x in labels if not re.fullmatch(r"wd\d+|fa|ocs|mail|email|[a-z]{2,3}\d{1,2}|\d+", x)]
+            return bool(named) and not any(t in x or x in t for x in named for t in tokens)
+    return False
+
+
+# Sender domains each ATS family uses for verification, reset and receipt mail. Subdomains of
+# these are accepted (DMARC-aligned); multi-tenant ones additionally need tenant identity.
+KNOWN_SENDERS = {
+    "greenhouse": ["greenhouse.io", "us.greenhouse-mail.io", "eu.greenhouse-mail.io", "anz.greenhouse.io"],
+    "workday": ["myworkday.com", "otp.workday.com"],
+    "icims": ["icims.com"],
+    "oracle": ["oraclecloud.com", "oracle.com"],
+    "taleo": ["taleo.net"],
+    "successfactors": ["successfactors.com", "successfactors.eu", "sapsf.com"],
+    "eightfold": ["eightfold.ai"],
+    "smartrecruiters": ["smartrecruiters.com"],
+    "avature": ["avature.net"],
+    "jobvite": ["jobvite.com"],
+}
 
 
 class RuleInput(BaseModel):
@@ -75,7 +162,7 @@ class Vault:
         return json.loads(self.cipher.decrypt(value.encode()))
 
 
-def extract_message(message, rule, challenge):
+def extract_message(message, rule, challenge, *, identity_only=False):
     """Return one unambiguous token; message text never becomes model instructions."""
     received = int(message.get("internalDate", "0")) / 1000
     if received < challenge["since"] or received > challenge["expires"]:
@@ -87,8 +174,14 @@ def extract_message(message, rule, challenge):
     senders = getaddresses(values.get("from", []))
     if len(senders) != 1:
         return None
-    domain = senders[0][1].rpartition("@")[2].lower()
-    if domain not in rule["sender_domains"]:
+    address = senders[0][1].lower()
+    domain = address.rpartition("@")[2]
+    tokens = challenge.get("tenant_tokens") or []
+    if not domain or not sender_allowed(
+        domain, rule["sender_domains"], tokens, challenge.get("employer_senders", False)
+    ):
+        return None
+    if tenant_conflict(address, domain, tokens):
         return None
     recipients = getaddresses(values.get("to", []) + values.get("delivered-to", []))
     if challenge["recipient"].lower() not in {a.lower() for _, a in recipients}:
@@ -107,6 +200,8 @@ def extract_message(message, rule, challenge):
     )
     if not authenticated:
         return None
+    reset = challenge["kind"] == "password_reset"
+    link_cue = r"reset.{0,30}password|password.{0,30}reset" if reset else r"verif|confirm|sign.?in|log.?in|continue|activate"
     texts, links, size = [], [], 0
 
     def walk(part, depth=0):
@@ -129,13 +224,13 @@ def extract_message(message, rule, challenge):
             texts.append(text)
             if soup:
                 for a in soup.select("a[href]"):
-                    if re.search(r"verif|confirm|sign.?in|log.?in|continue|activate", a.get_text(" "), re.I):
+                    if re.search(link_cue, a.get_text(" "), re.I):
                         links.append(a["href"])
             else:
                 # Plain-text links need a verification cue on the adjacent line.
                 for match in re.finditer(r"https://[^\s<>\"']+", raw):
                     if re.search(
-                        r"verif|confirm|sign.?in|log.?in|activate",
+                        link_cue,
                         raw[max(0, match.start() - 120) : match.end()],
                         re.I,
                     ):
@@ -153,11 +248,27 @@ def extract_message(message, rule, challenge):
     )
     codes.update(
         re.findall(
+            r"(?i:security code field on your application\s*:)\s*([A-Za-z0-9]{8})\b",
+            text,
+        )
+    )
+    codes.update(
+        re.findall(
             r"\b([0-9]{4,10})\b(?i:\s+is your (?:verification|security|authentication|one.time|login|sign.in) (?:code|passcode|password))",
             text,
         )
     )
     codes -= {"PLEASE", "BELOW", "EXPIRES", "VALID", "YOUR", "REQUEST"}
+    if not codes and challenge["kind"] == "code" and CODE_CUE.search(text):
+        # "...code to continue your application with Acme: 482915." One standalone number only;
+        # years, dates and phone fragments are not codes. Never used when a link may be meant.
+        numbers = {
+            n
+            for n in re.findall(r"(?<![\d$.,:/+-])\b(\d{4,8})\b(?![\d.,/-]\d)", text)
+            if not 1900 <= int(n) <= 2100
+        }
+        if len(numbers) == 1:
+            codes = numbers
     valid_links = set()
     for link in links:
         try:
@@ -166,9 +277,11 @@ def extract_message(message, rule, challenge):
         except ValueError:
             continue
     kind = challenge["kind"]
+    if identity_only:
+        return {"kind":"link", "value":next(iter(valid_links))} if len(valid_links) == 1 else None
     if kind in {"code", "auto"} and len(codes) == 1:
         return {"kind": "code", "value": next(iter(codes))}
-    if kind in {"link", "auto"} and len(valid_links) == 1 and not codes:
+    if kind in {"link", "auto", "password_reset"} and len(valid_links) == 1 and (reset or not codes):
         return {"kind": "link", "value": next(iter(valid_links))}
     return None
 
@@ -180,6 +293,15 @@ class MailService:
         self.transport = None  # An injected transport is used only by owned fixtures.
         self.locks = {}
         self.poll_lock = asyncio.Lock()
+        if config.gmail_address and config.gmail_app_password:
+            email = config.gmail_address.strip().lower()
+            with db.exclusive() as s:
+                box = s.scalar(select(Mailbox).where(Mailbox.email == email))
+                value = {"provider": "gmail_imap", "address": email}
+                if not box:
+                    s.add(Mailbox(email=email, credentials=self.vault.seal(value)))
+                elif self.vault.open(box.credentials).get("provider") == "gmail_imap":
+                    box.credentials, box.state, box.error = self.vault.seal(value), "connected", ""
 
     def client(self):
         return httpx.AsyncClient(
@@ -294,6 +416,31 @@ class MailService:
                     raise ValueError("Reconnect the Gmail mailbox")
                 stored = box.credentials
                 token = self.vault.open(stored)
+            if token.get("provider") == "gmail_imap":
+                from .gmail_imap import request
+
+                if (
+                    token["address"] != self.config.gmail_address.strip().lower()
+                    or not self.config.gmail_app_password
+                ):
+                    raise ValueError("Restore GMAIL_ADDRESS and GMAIL_APP_PASSWORD in .env")
+                try:
+                    result = await asyncio.to_thread(
+                        request,
+                        token["address"],
+                        "".join(self.config.gmail_app_password.split()),
+                        path,
+                        params,
+                    )
+                except Exception:
+                    self.connection_error(
+                        mailbox_id, "reconnect_required", "Gmail login failed; check the app password in .env"
+                    )
+                    raise ValueError("Gmail login failed; check the app password in .env") from None
+                with self.db.exclusive() as s:
+                    if box := s.get(Mailbox, mailbox_id):
+                        box.checked_at, box.error = now(), ""
+                return result
             async with self.client() as client:
                 if token.get("expires_at", 0) < time.time() + 60:
                     r = await client.post(
@@ -401,8 +548,79 @@ class MailService:
                     return record(rule)
         return None
 
+    async def ensure_rule(self, job, recipient):
+        """Known ATS senders are scoped to this employer and the applicant's mailbox."""
+        existing = self.rule_for(job["url"])
+        if existing:
+            if job.get('ats') == 'workday' and existing['sender_domains'] == ['myworkday.com']:
+                with self.db.exclusive() as s:
+                    row = s.get(MailRule, existing['id'])
+                    row.sender_domains = ['myworkday.com', 'otp.workday.com']
+                existing['sender_domains'] = ['myworkday.com', 'otp.workday.com']
+            return existing
+        known = KNOWN_SENDERS
+        if job.get("ats") not in known:
+            return None
+        with self.db.session() as s:
+            box = s.scalar(
+                select(Mailbox).where(Mailbox.email == recipient.lower(), Mailbox.state == "connected")
+            )
+            if not box:
+                return None
+            mailbox_id = box.id
+        url = urlsplit(job["url"])
+        prefix = "/" + url.path.strip("/").split("/")[0] if job["ats"] == "greenhouse" else "/"
+        return await self.save_rule(
+            RuleInput(
+                mailbox_id=mailbox_id,
+                employer_origin=origin(job["url"]) + prefix,
+                sender_domains=known[job["ats"]],
+            )
+        )
+
+    async def discover_rule(self, job, recipient, since):
+        """Learn an unfamiliar sender only from authenticated, employer-bound mail.
+
+        A code alone is insufficient to attribute a shared ATS sender. Require an
+        exact employer-origin verification link in the same fresh message.
+        """
+        if existing := self.rule_for(job['url']):
+            return existing
+        with self.db.session() as s:
+            box = s.scalar(select(Mailbox).where(Mailbox.email == recipient.lower(), Mailbox.state == 'connected'))
+            if not box:
+                return None
+            mailbox_id = box.id
+        listed = await self.request(mailbox_id, '/messages', {
+            'q': f'after:{int(since)} to:{recipient} {{subject:verify subject:verification subject:confirm subject:activate subject:code}}',
+            'maxResults': 10, 'includeSpamTrash': 'false',
+        })
+        if listed.get('nextPageToken'):
+            return None
+        matches = set()
+        for item in listed.get('messages', []):
+            message = await self.request(mailbox_id, '/messages/' + item['id'], {'format':'full'})
+            headers = message.get('payload', {}).get('headers', [])
+            senders = getaddresses([h['value'] for h in headers if h['name'].lower() == 'from'])
+            if len(senders) != 1:
+                continue
+            domain = senders[0][1].rpartition('@')[2].lower()
+            rule = {'sender_domains':[domain], 'link_origins':[origin(job['url'])]}
+            challenge = {'since':since, 'expires':time.time()+1, 'recipient':recipient, 'kind':'password_reset'}
+            # Link extraction normally avoids ambiguous code+link messages. Here
+            # we only use the link to prove employer ownership, never open it.
+            token = extract_message(message, rule, {**challenge, 'kind':'link'}, identity_only=True)
+            if token and token['kind'] == 'link':
+                matches.add(domain)
+        if len(matches) != 1:
+            return None
+        return await self.save_rule(RuleInput(
+            mailbox_id=mailbox_id, employer_origin=origin(job['url']),
+            sender_domains=list(matches), link_origins=[origin(job['url'])],
+        ))
+
     def begin(self, run_id, rule, recipient, kind="auto", since=None):
-        if kind not in {"auto", "code", "link"} or not re.fullmatch(
+        if kind not in {"auto", "code", "link", "password_reset"} or not re.fullmatch(
             r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,63}", recipient
         ):
             raise ValueError("Email verification requires a valid applicant email address")
@@ -410,7 +628,7 @@ class MailService:
         with self.db.exclusive() as s:
             run = s.get(Run, run_id)
             box = s.get(Mailbox, rule["mailbox_id"])
-            if not run or run.state != "running" or not box or box.state != "connected":
+            if not run or run.state not in {"running", "submitting"} or not box or box.state != "connected":
                 raise ValueError("Verification requires a running application and connected mailbox")
             previous = s.scalar(
                 select(MailChallenge).where(MailChallenge.run_id == run_id, MailChallenge.state.in_(LIVE))
@@ -442,6 +660,16 @@ class MailService:
             s.add(c)
             s.flush()
             return record(c)
+
+    def narrow(self, challenge_id, kind):
+        """The website now shows what it sent (a code field, or a check-your-email page): an open
+        "auto" request window accepts only that kind from here on."""
+        if kind not in {"code", "link"}:
+            return
+        with self.db.exclusive() as s:
+            c = s.get(MailChallenge, challenge_id)
+            if c and c.state == "pending" and c.kind == "auto":
+                c.kind = kind
 
     def outcome(self, challenge_id, state, reason=""):
         with self.db.exclusive() as s:
@@ -479,7 +707,7 @@ class MailService:
                 current = time.time()
                 for c in s.scalars(select(MailChallenge).where(MailChallenge.state.in_(LIVE))):
                     run = s.get(Run, c.run_id)
-                    if c.expires < current or not run or run.state != "running":
+                    if c.expires < current or not run or run.state not in {"running", "submitting"}:
                         c.state, c.payload, c.reason = (
                             "expired",
                             "",
@@ -493,14 +721,25 @@ class MailService:
                 with self.db.session() as s:
                     row = s.get(MailRule, c["rule_id"])
                     rule = record(row) if row and row.enabled else None
+                    run = s.get(Run, c["run_id"])
+                    job = s.get(Job, run.job_id) if run else None
+                    # Tenant identity: the employer this run applies to, never message text.
+                    c["tenant_tokens"] = tenant_tokens(
+                        (job.url if job else "") or (rule or {}).get("employer_origin", ""),
+                        job.company if job else "",
+                    )
+                    c["employer_senders"] = bool(job and job.ats in EMPLOYER_SENDER_FAMILIES)
                 if not rule:
                     self.outcome(c["id"], "cancelled", "Verification rule was removed or disabled")
                     continue
                 try:
+                    senders = list(rule["sender_domains"])
+                    if c["employer_senders"]:
+                        senders += c["tenant_tokens"]
                     query = (
                         f"after:{int(c['since'])} to:{c['recipient']} "
                         + "{"
-                        + " ".join("from:" + d for d in rule["sender_domains"])
+                        + " ".join("from:" + d for d in senders)
                         + "}"
                     )
                     listed = await self.request(
@@ -556,9 +795,15 @@ class MailService:
                                 row.state, row.payload = "failed", ""
 
     async def poll(self):
+        last_receipts = 0
         while True:
             try:
                 await self.poll_once()
+                if time.time() - last_receipts > 60:
+                    from .receipts import check_receipts
+
+                    last_receipts = time.time()
+                    await check_receipts(self)
             except Exception:
                 pass  # Connection/challenge status is the public diagnostic, never secret-bearing errors.
             await asyncio.sleep(self.config.mail_poll_seconds)
@@ -580,6 +825,12 @@ class MailService:
                 ):
                     c.state, c.payload, c.reason = "cancelled", "", "Mailbox disconnected"
             revoked = False
+            if token.get("provider") == "gmail_imap":
+                return {
+                    "disconnected": True,
+                    "revoked": False,
+                    "message": "Remove GMAIL_APP_PASSWORD from .env and revoke it in your Google account to keep it disconnected.",
+                }
             try:
                 async with self.client() as client:
                     r = await client.post(

@@ -33,7 +33,9 @@ async def source_workflow(source_id: str):
                     break
                 try:
                     result = await rank(service.db, service.config, job_id)
-                    if result["eligible"] and not result["uncertainties"]:
+                    if result["eligible"] and (
+                        not result["uncertainties"] or service.db.get_setting("profile", {}).get("autonomous")
+                    ):
                         await service.queue(job_id, "submit", result["resume_id"])
                 except (ValueError, RuntimeError):
                     continue
@@ -95,7 +97,11 @@ async def start(service):
     async def dispatch(run_id):
         with service.db.session() as s:
             run = s.get(Run, run_id)
-            host = urlsplit(s.get(Job, run.job_id).url).hostname
+            job = s.get(Job, run.job_id)
+            parsed = urlsplit(job.url)
+            host = parsed.hostname
+            if job.ats in {"greenhouse", "lever", "ashby"}:
+                host += "/" + parsed.path.strip("/").split("/")[0]
         # Partitioned DBOS queues do not support dedup IDs. The application row's
         # atomic queued -> running transition provides delivery idempotency.
         with SetEnqueueOptions(queue_partition_key=host):

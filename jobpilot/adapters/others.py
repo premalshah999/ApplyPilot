@@ -13,7 +13,7 @@ class Taleo(Adapter):
     name = "Taleo"
     max_steps = 50
 
-    def classify(self, obs):
+    def classify_page(self, obs):
         text = obs["text"]
         buttons = [b["label"].lower() for b in obs["controls"]]
         if re.search(r"privacy (?:agreement|statement)|legal (?:disclaimer|agreement)", text, re.I) and any(
@@ -22,7 +22,7 @@ class Taleo(Adapter):
             fields = [f for f in self.app_fields(obs) if f["type"] != "checkbox"]
             if not fields:
                 return Step.CONSENT
-        return super().classify(obs)
+        return super().classify_page(obs)
 
     def is_login_field(self, f):
         # Taleo asks for a "User Name"; the shared email is used as the username.

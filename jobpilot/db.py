@@ -181,47 +181,6 @@ class MailOAuth(Base):
     expires: Mapped[float] = mapped_column(Float)
 
 
-class Account(Base):
-    """One login per employer realm (tenant host). The password itself lives only in the environment."""
-
-    __tablename__ = "accounts"
-    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
-    realm: Mapped[str] = mapped_column(String, unique=True)
-    ats: Mapped[str] = mapped_column(String, default="custom")
-    email: Mapped[str] = mapped_column(String)
-    # unknown -> created -> verified -> active; failed/locked need attention.
-    state: Mapped[str] = mapped_column(String, default="unknown")
-    password_hash: Mapped[str] = mapped_column(String, default="")
-    resets: Mapped[int] = mapped_column(Integer, default=0)
-    last_error: Mapped[str] = mapped_column(Text, default="")
-    created_at: Mapped[str] = mapped_column(String, default=now)
-    updated_at: Mapped[str] = mapped_column(String, default=now)
-
-
-class Knowledge(Base):
-    """Answers learned from Telegram/dashboard, reusable across employers."""
-
-    __tablename__ = "knowledge"
-    __table_args__ = (UniqueConstraint("norm", "scope"),)
-    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
-    question: Mapped[str] = mapped_column(Text)
-    norm: Mapped[str] = mapped_column(String, index=True)
-    options: Mapped[list] = mapped_column(JSON, default=list)
-    answer: Mapped[str] = mapped_column(Text)
-    scope: Mapped[str] = mapped_column(String, default="global")
-    source: Mapped[str] = mapped_column(String, default="dashboard")
-    uses: Mapped[int] = mapped_column(Integer, default=0)
-    created_at: Mapped[str] = mapped_column(String, default=now)
-    updated_at: Mapped[str] = mapped_column(String, default=now)
-
-
-class TelegramPrompt(Base):
-    __tablename__ = "telegram_prompts"
-    message_id: Mapped[str] = mapped_column(String, primary_key=True)
-    review_id: Mapped[str] = mapped_column(String, index=True)
-    created_at: Mapped[str] = mapped_column(String, default=now)
-
-
 def record(obj):
     return {c.name: getattr(obj, c.name) for c in obj.__table__.columns}
 

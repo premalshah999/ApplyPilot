@@ -13,6 +13,10 @@ SCAN = (Path(__file__).parent / "js" / "scan.js").read_text()
 FINAL = re.compile(
     r"\bsubmit\b|send (?:my )?application|complete (?:my )?application|finish application", re.IGNORECASE
 )
+ENTRY = re.compile(
+    r"^(?:apply(?: now| for (?:this|the) (?:job|position))?|start (?:your )?application|"
+    r"continue application|i.m interested|apply manually|autofill with resume)$", re.I
+)
 AUTH = re.compile(r"password|verification code|one.time|authentication code|security code", re.IGNORECASE)
 RESUME = re.compile(r"resume|cv\b|curriculum", re.IGNORECASE)
 NOT_RESUME = re.compile(
@@ -23,6 +27,18 @@ USEFUL_OPTIONAL = re.compile(
     r"linkedin|github|portfolio|website|salary|compensation|start date|notice|hear about|how did you|referr",
     re.IGNORECASE,
 )
+# Single-page ATSs whose react-select comboboxes keep their proven live behavior.
+WORKDAY_HOST = re.compile(r"myworkdayjobs\.com|myworkdaysite\.com", re.I)
+SINGLE_PAGE_HOSTS = re.compile(r"greenhouse\.io|lever\.co|ashbyhq\.com", re.I)
+# Frames that never hold applicant fields: CAPTCHA/bot-check providers, analytics, media, chat.
+PROVIDER_FRAME = re.compile(
+    r"hcaptcha\.com|newassets\.hcaptcha|google\.com/recaptcha|recaptcha\.net|gstatic\.com/recaptcha|"
+    r"challenges\.cloudflare\.com|turnstile|arkoselabs|funcaptcha|geetest|datadome|perimeterx|px-cdn|"
+    r"captcha-delivery|googletagmanager|doubleclick|youtube\.com/embed|player\.vimeo|intercom|drift\.com|"
+    r"zendesk|livechat",
+    re.I,
+)
+MAX_FRAMES = 12
 DEPENDENT_TYPES = {"radio", "radiogroup", "select", "dropdown", "pills", "checkbox", "combobox", "prompt"}
 
 
@@ -51,12 +67,17 @@ def has_value(field):
 class NetworkMonitor:
     """Counts in-flight XHR/fetch so waits follow the application instead of fixed sleeps."""
 
-    def __init__(self, context):
+    def __init__(self, target):
+        # A page (or a private context). Never a shared desktop context: other workers' traffic
+        # would keep this run waiting.
         self.inflight = {}
         self.last = time.monotonic()
-        context.on("request", self._start)
-        context.on("requestfinished", self._end)
-        context.on("requestfailed", self._end)
+        self.watch(target)
+
+    def watch(self, target):
+        target.on("request", self._start)
+        target.on("requestfinished", self._end)
+        target.on("requestfailed", self._end)
 
     def _start(self, request):
         if request.resource_type in {"xhr", "fetch", "document"}:
@@ -80,6 +101,8 @@ class FormSession:
         self.fields, self.buttons, self.frames = {}, {}, {}
         self.meta = {"headings": [], "errors": [], "automation": [], "busy": False, "title": "", "url": ""}
         self.expected = {}
+        self.expected_labels = {}
+        self.expected_slots = {}
         self.ledger = {}
         self.pending = []
         self.uploaded = False
@@ -94,13 +117,23 @@ class FormSession:
             "headings": [],
             "errors": [],
             "automation": [],
+            "dialogs": [],
             "busy": False,
             "title": "",
             "url": self.page.url,
         }
-        for n, frame in enumerate(self.page.frames):
+        for n, frame in enumerate(self.page.frames[:MAX_FRAMES]):
             try:
-                data = await frame.evaluate(SCAN)
+                if frame != self.page.main_frame:
+                    if frame.is_detached() or PROVIDER_FRAME.search(frame.url or ""):
+                        continue
+                    owner = await frame.frame_element()
+                    identity = await owner.evaluate("e=>[e.title,e.id,e.src?.slice(0,200)].join(' ')")
+                    # CAPTCHA widgets (Skip, Refresh Challenge, accessibility) are never applicant
+                    # fields or navigation; the CAPTCHA solver owns them.
+                    if PROVIDER_FRAME.search(identity) or re.search(r"hcaptcha|recaptcha|challenge", identity, re.I):
+                        continue
+                data = await asyncio.wait_for(frame.evaluate(SCAN), timeout=5)
             except Exception:
                 continue
             texts.append(data["text"])
@@ -108,6 +141,17 @@ class FormSession:
                 meta["title"] = data.get("title", "")
             for key in ("headings", "errors", "automation"):
                 meta[key].extend(data.get(key, []))
+            for d in data.get("dialogs", []):
+                prefix = f"f{n}-{data['document_id']}-"
+                meta["dialogs"].append(
+                    {
+                        "title": d.get("title", ""),
+                        "text": d.get("text", ""),
+                        "automation": d.get("automation", []),
+                        "field_ids": [prefix + x for x in d.get("field_ids", [])],
+                        "control_ids": [prefix + x for x in d.get("control_ids", [])],
+                    }
+                )
             meta["busy"] = meta["busy"] or data.get("busy", False)
             for kind in ("fields", "buttons"):
                 for item in data[kind]:
@@ -126,12 +170,17 @@ class FormSession:
         for peers in boxes.values():
             for f in peers:
                 f["peers"] = " | ".join(x["label"] for x in peers if x is not f)[:600]
+        slots = {}
+        for field in self.fields.values():
+            key = (normalize(field["label"]), field["type"])
+            field["slot"] = slots.get(key, 0)
+            slots[key] = field["slot"] + 1
         return {
             "fields": list(self.fields.values()),
             "controls": list(self.buttons.values()),
             "text": "\n".join(texts)[:22000],
             "url": self.page.url,
-            **{k: meta[k] for k in ("headings", "errors", "automation", "busy", "title")},
+            **{k: meta[k] for k in ("headings", "errors", "automation", "dialogs", "busy", "title")},
         }
 
     def locator(self, field_id):
@@ -168,13 +217,59 @@ class FormSession:
         unnamed = [f for f in files if not NOT_RESUME.search(f["label"])]
         return unnamed[:1] if len(files) == 1 else []
 
+    async def set_checked(self, el, checked):
+        if await el.is_checked() == checked:
+            return
+        if await el.is_visible():
+            await el.set_checked(checked, timeout=4000)
+        else:
+            label = await el.evaluate_handle(
+                "e=>e.labels?.[0] || document.getElementById((e.getAttribute('aria-labelledby')||'').split(' ')[0])"
+            )
+            target = label.as_element()
+            if not target or not await target.is_visible():
+                raise ValueError("Checkbox or radio label is not visible")
+            await target.click(timeout=4000)
+            if not await el.is_checked() and checked and self.resolver.profile.accept_all_application_terms:
+                handle = await el.element_handle()
+                frame = await handle.owner_frame()
+                agree = frame.get_by_role("button", name=re.compile(r"^(?:I )?Agree$", re.I))
+                if await agree.count() == 1 and await agree.is_visible():
+                    agreed = await agree.element_handle()
+                    await agreed.evaluate("e=>e.dataset.jpAuthControl='true'")
+                    try:
+                        await agreed.click(timeout=4000)
+                    finally:
+                        await agreed.evaluate("e=>delete e.dataset.jpAuthControl")
+                    await self.page.wait_for_timeout(200)
+        if await el.is_checked() != checked:
+            raise ValueError("Checkbox or radio selection was not accepted")
+
     async def fill(self, field, value):
         el = self.locator(field["id"])
         frame = self.frames[field["id"]]
         kind = field["type"]
         committed = value
         if kind == "checkbox":
-            committed = await widgets.checkbox(el, value, field.get("widget", ""))
+            want = str(value).strip().lower() in {"true", "yes", "checked", "1", "on"}
+            if await el.evaluate("e => e.tagName === 'INPUT'"):
+                # Label clicks, plus an "I Agree" dialog some portals open from the checkbox (Oracle).
+                await self.set_checked(el, want)
+                committed = "true" if want else "false"
+            else:
+                committed = await widgets.checkbox(el, value, field.get("widget", ""))
+        elif kind == "checkboxgroup":
+            name = await el.get_attribute("name")
+            matched = False
+            for checkbox in await self.frames[field["id"]].locator('input[type="checkbox"]').all():
+                if await checkbox.get_attribute("name") != name:
+                    continue
+                label = await checkbox.evaluate("e=>[...(e.labels||[])].map(x=>x.innerText.trim()).join(' ')")
+                selected = normalize(label) == normalize(value)
+                await self.set_checked(checkbox, selected)
+                matched = matched or selected
+            if not matched:
+                raise ValueError("Checkbox answer is no longer present")
         elif kind == "select":
             committed = await widgets.select(el, value, field.get("widget", ""))
         elif kind == "radio":
@@ -195,7 +290,7 @@ class FormSession:
                 chosen = next((r for r, t in candidates if t == match), None) if match else None
             if chosen is not None:
                 try:
-                    await chosen.check(timeout=4000, force=field.get("widget") == "label")
+                    await self.set_checked(chosen, True)
                 except Exception:
                     await chosen.evaluate("e => (e.labels && e.labels[0] ? e.labels[0] : e).click()")
                 found = True
@@ -209,6 +304,10 @@ class FormSession:
                 await radios.nth(texts.index(match)).click(timeout=4000)
             else:
                 await el.get_by_role("radio", name=value, exact=True).click(timeout=4000)
+        elif kind == "buttonchoice":
+            await el.get_by_role("button", name=value, exact=True).click(timeout=4000)
+        elif kind == "combobox" and SINGLE_PAGE_HOSTS.search(self.page.url):
+            committed = await self._combobox_single_page(field, el, value)
         elif kind == "combobox":
             committed = await widgets.combobox(frame, el, value)
         elif kind == "dropdown":
@@ -228,8 +327,49 @@ class FormSession:
                 await el.blur()
             except Exception:
                 pass
+        if kind == "combobox" and field["label"] == "Country":
+            # Greenhouse's phone-country picker shows only the dial code after
+            # an exact option was clicked (for example, "United States +1" -> "+1").
+            displayed = await el.evaluate(
+                "e=>e.closest('.select__control')?.querySelector('.select__single-value')?.textContent.trim() || ''"
+            )
+            if re.fullmatch(r"\+\d+", displayed) and str(committed).endswith(displayed):
+                committed = displayed
         self.expected[field["id"]] = committed
+        self.expected_labels[(normalize(field["label"]), kind)] = committed
+        self.expected_slots[(normalize(field["label"]), kind, field.get("slot", 0))] = committed
         return committed
+
+    async def _combobox_single_page(self, field, el, value):
+        """Greenhouse/Lever/Ashby react-select comboboxes (the behavior proven on live runs)."""
+        await el.click(timeout=4000)
+        if await el.evaluate("e=>['INPUT','TEXTAREA'].includes(e.tagName)"):
+            await el.fill(value, timeout=4000)
+        options = self.frames[field["id"]].locator('[role="option"]')
+        exact = options.filter(has_text=re.compile("^" + re.escape(value) + "$"))
+        if re.search(r"location|city|currently based", field["label"], re.I):
+            await options.first.wait_for(timeout=5000)
+            labels = await options.all_text_contents()
+            location = self.resolver.profile.location
+            region = location.split(",")[1].strip() if "," in location else ""
+            from .answers import US_STATES
+
+            region = US_STATES.get(region.upper(), region).casefold()
+            candidates = [
+                label for label in labels if value.casefold() in label.casefold() and region and region in label.casefold()
+            ]
+            if candidates:
+                value = candidates[0]
+                exact = self.frames[field["id"]].get_by_role("option", name=value, exact=True)
+        if await exact.count():
+            await exact.first.click(timeout=5000)
+        else:
+            match = widgets.best_option([t.strip() for t in await options.all_text_contents()], value)
+            if not match:
+                raise ValueError("Option is not offered")
+            await options.filter(has_text=re.compile("^" + re.escape(match) + "$")).first.click(timeout=5000)
+            value = match
+        return value
 
     async def discover_options(self, field):
         """Open custom selects once to read their real choices before the resolver decides."""
@@ -278,32 +418,106 @@ class FormSession:
             }
         )
 
+    @property
+    def workday(self):
+        return bool(WORKDAY_HOST.search(self.page.url))
+
+    async def wait_upload(self):
+        """Wait for the website's own upload acknowledgement, not a fixed delay."""
+        greenhouse = self.page.locator('.file-upload[aria-labelledby="upload-label-resume"]')
+        try:
+            if await greenhouse.count():
+                await greenhouse.locator(".file-upload__filename").wait_for(timeout=15000)
+            elif self.workday:
+                await self.page.get_by_text("Successfully Uploaded!", exact=True).wait_for(timeout=20000)
+            else:
+                await self.page.wait_for_timeout(150)
+                await self.settle(timeout=12)
+        except Exception:
+            pass  # verify() reads the result back and reports a missing attachment.
+
+    def preselected(self, field, experience):
+        """Workday values the employer or its resume parser already set; recorded, not re-entered."""
+        parsed = experience and has_value(field)  # An unticked checkbox reports "false".
+        contact = bool(field["value"]) and (
+            (field["label"] == "Country" and field["value"] == "United States of America")
+            or (field["label"] == "Phone Device Type" and field["value"] == "Mobile")
+            or (field["label"] == "Country Phone Code" and field["value"] == "United States of America (+1)")
+        )
+        if not (parsed or contact):
+            return False
+        key = (normalize(field["label"]), field["type"])
+        self.expected[field["id"]] = field["value"]
+        self.expected_labels[key] = field["value"]
+        self.expected_slots[key + (field.get("slot", 0),)] = field["value"]
+        self.ledger[field["id"]] = {
+            "label": field["label"],
+            "type": field["type"],
+            "slot": field.get("slot", 0),
+            "answer": field["value"],
+            "evidence_ids": ["resume:parsed" if parsed else "employer:preselected"],
+            "verified": False,
+        }
+        return True
+
+    async def rematch(self, field):
+        await self.scan()
+        matches = [
+            item
+            for item in self.fields.values()
+            if item["label"] == field["label"]
+            and item["type"] == field["type"]
+            and item.get("slot", 0) == field.get("slot", 0)
+        ]
+        if len(matches) != 1:
+            raise ValueError("Question changed while filling")
+        return matches[0]
+
     async def fill_current(self, accept_prefilled=None):
         if accept_prefilled is not None:
             self.accept_prefilled = accept_prefilled
         await self.scan()
         self.pending = []
+        self.expected = {}
+        self.expected_labels = {}
+        self.expected_slots = {}
+        if self.workday:
+            body = await self._page_text()
+            if self.resume_path.name in body and "Successfully Uploaded!" in body:
+                self.uploaded = self.upload_verified = True
         # Upload first: parsing can overwrite fields and change the page.
         page_text = await self._page_text() if self.uploaded else ""
         for field in self.resume_fields():
+            if self.workday and self.uploaded and self.upload_verified:
+                continue
             # Some ATSs clear the input after upload and list the file instead.
             if not field["value"] and self.resume_path.name not in page_text:
                 await self.locator(field["id"]).set_input_files(str(self.resume_path), timeout=15000)
-                await self.page.wait_for_timeout(150)
-                await self.settle(timeout=12)
+                await self.wait_upload()
             self.uploaded = True
+        await self.scan()
+        experience = self.workday and bool(
+            await self.page.get_by_role("heading", name="My Experience", exact=True).count()
+        )
         handled, rounds = set(), 0
         while rounds < 3:
             rounds += 1
             await self.scan()
-            todo = [
-                x
-                for x in self.fields.values()
-                if x["type"] not in ("file", "password")
-                and x["id"] not in handled
-                and not AUTH.search(x["label"])
-                and not (self.accept_prefilled and has_value(x) and x["valid"] and not x["required"])
-            ]
+            todo = []
+            for x in self.fields.values():
+                if (
+                    x["type"] in ("file", "password")
+                    or x["id"] in handled
+                    or AUTH.search(x["label"])
+                    or (self.accept_prefilled and has_value(x) and x["valid"] and not x["required"])
+                ):
+                    continue
+                if self.workday and self.preselected(x, experience):
+                    handled.add(x["id"])
+                    continue
+                if experience and not x["required"] and not has_value(x) and not self.resolver.knows(x):
+                    continue  # Optional Workday experience details without a profile answer stay blank.
+                todo.append(x)
             if not todo:
                 break
             for field in todo:
@@ -330,6 +544,8 @@ class FormSession:
                         if self.accept_prefilled and has_value(field) and field["valid"]:
                             self.ledger[field["id"]] = {
                                 "label": field["label"],
+                                "type": field["type"],
+                                "slot": field.get("slot", 0),
                                 "answer": field["value"],
                                 "evidence_ids": ["prefilled"],
                                 "verified": True,
@@ -343,6 +559,10 @@ class FormSession:
                     committed = field["value"]
                 else:
                     try:
+                        if self.workday:
+                            # Workday replaces controls after each selection. Resolve the same
+                            # visible question again before committing the next answer.
+                            field = await self.rematch(field)
                         committed = await self.fill(field, answer.value)
                         changed = changed or field["type"] in DEPENDENT_TYPES
                     except Exception as exc:
@@ -354,8 +574,10 @@ class FormSession:
                         if field["required"]:
                             self._pending(field, f"Could not commit the answer: {str(exc)[:120]}")
                         continue
-                self.ledger[answer.field_id] = {
+                self.ledger[field["id"]] = {
                     "label": field["label"],
+                    "type": field["type"],
+                    "slot": field.get("slot", 0),
                     "answer": committed,
                     "evidence_ids": answer.evidence_ids,
                     "verified": False,
@@ -375,20 +597,47 @@ class FormSession:
     async def verify(self):
         await self.scan()
         problems = []
+        greenhouse_resume = self.page.locator('.file-upload[aria-labelledby="upload-label-resume"]')
+        if await greenhouse_resume.count():
+            filenames = await greenhouse_resume.locator('.file-upload__filename').all_text_contents()
+            self.upload_verified = any(self.resume_path.name in name for name in filenames)
+            if not self.upload_verified:
+                problems.append("Resume upload has not been accepted by the website")
+        elif self.uploaded and self.workday:
+            body = await self._page_text()
+            self.upload_verified = (
+                "Successfully Uploaded!" in body and self.resume_path.name in body
+            ) or self.upload_verified
         for f in self.fields.values():
             expected = self.expected.get(f["id"])
+            if expected is None:
+                expected = self.expected_slots.get((normalize(f["label"]), f["type"], f.get("slot", 0)))
             if expected is not None:
                 same = widgets.same_value(f, f["value"], expected)
                 # Custom comboboxes must close after committing a choice.
-                if f["type"] == "combobox":
+                if f["type"] == "combobox" and not self.workday:
                     same = same and await self.locator(f["id"]).get_attribute("aria-expanded") != "true"
-                if f["id"] in self.ledger:
-                    self.ledger[f["id"]]["verified"] = same
+                ledger = self.ledger.get(f["id"])
+                if ledger is None:
+                    ledger = next(
+                        (
+                            item
+                            for item in self.ledger.values()
+                            if item["label"] == f["label"]
+                            and item.get("type") == f["type"]
+                            and item.get("slot") == f.get("slot", 0)
+                        ),
+                        None,
+                    )
+                if ledger is not None:
+                    ledger["verified"] = same
                 if not same:
                     problems.append(f"Value not accepted: {f['label']}")
             if f["type"] == "password" or AUTH.search(f["label"]):
                 continue
             if f in self.resume_fields() or (f["type"] == "file" and RESUME.search(f["label"])):
+                if self.workday and self.uploaded and self.upload_verified:
+                    continue
                 text = await self._page_text()
                 self.upload_verified = self.resume_path.name in f["value"] or self.resume_path.name in text
                 if not self.upload_verified:
@@ -424,18 +673,34 @@ class FormSession:
         allowed = auth_control or step_control
         if FINAL.search(button["label"]) and not allowed:
             raise ValueError("Use submit_application for final submission")
+        entry = bool(ENTRY.fullmatch(button["label"])) and not any(
+            f["type"] not in {"search", "hidden"} and not re.search(r"search|keyword|location", f["label"], re.I)
+            for f in self.fields.values()
+        )
         # Never let a generic navigation action activate a bare HTML submit control.
         if (
             not allowed
+            and not entry
             and button["type"] == "submit"
             and not re.search(r"next|continue|save|review|sign in|log in", button["label"], re.IGNORECASE)
         ):
             raise ValueError("This may submit the application; use submit_application")
-        pages = set(self.page.context.pages)
+        opener = self.page
+        opened = []
+        def on_popup(page):
+            opened.append(page)
+        opener.on("popup", on_popup)
         el = self.locator(control_id)
-        if allowed:
+        # Marked controls pass the page's submit guard: auth/step controls, entry links, and
+        # ordinary navigation labels.
+        permitted = allowed or entry or bool(
+            re.fullmatch(r"next|continue|save (?:and|&) continue|review(?: application)?", button["label"], re.I)
+        )
+        if permitted:
             el = await el.element_handle()
-            await el.evaluate("el => el.dataset.jpAuthControl='true'")
+            await el.evaluate(
+                "el => {el.dataset.jpAuthControl='true';const f=el.closest('form');if(f)f.dataset.jpAuthControl='true'}"
+            )
         try:
             try:
                 await el.click(timeout=6000)
@@ -451,16 +716,20 @@ class FormSession:
                 except Exception:
                     # Last resort: dispatch the click on this exact element, never at screen coordinates.
                     await el.evaluate("e => e.click()")
+            await opener.wait_for_timeout(120)
         finally:
-            if allowed:
+            opener.remove_listener("popup", on_popup)
+            if permitted:
                 try:
-                    await el.evaluate("el => delete el.dataset.jpAuthControl")
+                    await el.evaluate("el => {delete el.dataset.jpAuthControl;const f=el.closest('form');if(f)delete f.dataset.jpAuthControl}")
                 except Exception:
                     pass
-        await self.page.wait_for_timeout(120)
-        opened = [p for p in self.page.context.pages if p not in pages]
+        # Only popups opened by this page: with a shared desktop browser, other workers' tabs
+        # live in the same context and must never be adopted.
         if opened:
             self.page = opened[-1]
+            if callback := getattr(self, "on_popup", None):
+                await callback(self.page)
             await self.page.wait_for_load_state("domcontentloaded", timeout=15000)
         await self.settle(timeout=8)
         return await self.scan()
@@ -469,9 +738,9 @@ class FormSession:
         text = await self.page.locator("body").inner_text(timeout=5000)
         pattern = (
             r"thank you for (?:applying|your (?:job )?(?:application|submission))|"
-            r"application (?:has been |was )?(?:successfully )?(?:submitted|received|complete)|"
-            r"we (?:have )?received your application|successfully (?:applied|submitted)|"
-            r"your application (?:is|has been) (?:complete|submitted|on its way)|"
+            r"application (?:has been |was )?(?:successfully )?(?:submitted|received)|"
+            r"we(?:'ve| have)? received your application|successfully (?:applied|submitted)|"
+            r"your application (?:is |has been |was )?(?:complete|submitted|received|on its way)|"
             r"you(?:'ve| have) (?:successfully )?applied"
         )
         match = re.search(pattern, text, re.IGNORECASE)
@@ -483,3 +752,18 @@ class FormSession:
             "title": await self.page.title(),
             "type": "explicit_confirmation_page",
         }
+
+    async def rejection(self):
+        text = await self.page.locator("body").inner_text(timeout=5000)
+        match = re.search(
+            r"(?:we )?(?:couldn.t|could not|unable to) submit your application|"
+            r"application submission was (?:flagged|rejected)|"
+            r"your form needs corrections|missing entry for required field|"
+            r"your application (?:could not|couldn.t) be submitted", text, re.I
+        )
+        if match:
+            return {
+                "type": "explicit_rejection_page", "url": self.page.url,
+                "evidence": text[max(0, match.start() - 20):match.end() + 400],
+            }
+        return None

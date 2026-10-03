@@ -254,14 +254,17 @@ function signInPage() {
   app.append(forgot, create);
 }
 function forgotPage() {
-  app.innerHTML = '<h2>Forgot Password</h2>';
-  app.append(text('fp_email', 'email', 'Email Address', true));
-  const b = h('<button type="button" data-automation-id="passwordResetSubmitButton">Submit</button>');
+  // Live Workday opens a "Reset Password" dialog over the sign-in page.
+  const modal = h('<div role="dialog" aria-modal="true" aria-label="Reset Password" class="modal" data-automation-id="popUpDialog"><h2>Reset Password</h2></div>');
+  const email = text('fp_email', 'email', 'Email Address', true);
+  const b = h('<button type="button" data-automation-id="resetPasswordButton">Reset Password</button>');
   b.addEventListener('click', async () => {
     await api('forgot', { email: S.values.fp_email });
-    app.innerHTML = '<h2>Check your email</h2><p>We sent you an email with a link to reset your password.</p>';
+    modal.innerHTML = '<h2>Reset Password</h2><p>An email has been sent with instructions to reset your password.</p>';
+    setTimeout(() => modal.remove(), 1500);
   });
-  app.append(b);
+  modal.append(email, b);
+  document.body.append(modal);
 }
 async function activatePage(token) {
   const r = await api('activate', { token });

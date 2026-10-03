@@ -61,6 +61,12 @@
       const t = clean(labels.map(textOf).join(' '));
       if (t) return t;
     }
+    // Lever: <div class="application-question"><div class="application-label">Question</div>...
+    const appLabel = el.closest('.application-question')?.querySelector('.application-label');
+    if (appLabel && !['checkbox', 'radio'].includes(el.type)) {
+      const t = textOf(appLabel);
+      if (t) return t;
+    }
     const legend = el.closest('[role=group],fieldset')?.querySelector('legend');
     if (legend && legend.innerText.trim()) return clean(legend.innerText);
     const wrapped = wrapperLabel(el);
@@ -109,6 +115,19 @@
   const isReq = (el, q) => !!el.required || el.getAttribute('aria-required') === 'true' || /\*/.test(q);
   const tidy = q => clean(q).replace(/\s*\*\s*$/, '').replace(/\s*\(?\brequired\)?\s*$/i, '').replace(/\s*\*\s*$/, '').trim();
   const PLACEHOLDER_VALUE = /^(select( one)?|select\.\.\.|choose( one)?|choose\.\.\.|-+|--\s*select\s*--|please select|none selected)$/i;
+
+  // Never applicant fields: inert/hidden subtrees, honeypots, CAPTCHA widgets and their responses.
+  const HONEYPOT = /honey.?pot|beecatcher|bot.?trap|leave.?(?:this|blank)|^hp_/i;
+  const CAPTCHA_BOX = '.h-captcha,.g-recaptcha,.cf-turnstile,#px-captcha,[data-hcaptcha-widget-id],[data-sitekey]';
+  // A select2/chosen <select> is itself aria-hidden behind its visible proxy; that one stays.
+  const hiddenTree = el => {
+    const h = el.closest('[inert],[aria-hidden="true"]');
+    return !!h && !(h === el && el.tagName === 'SELECT');
+  };
+  const excluded = el => hiddenTree(el) || !!el.closest(CAPTCHA_BOX)
+    || el.dataset.automationId === 'beecatcher'
+    || HONEYPOT.test(`${el.id || ''} ${el.getAttribute('name') || ''} ${el.className && el.className.baseVal === undefined ? el.className : ''}`)
+    || /captcha|recaptcha|turnstile/i.test(`${el.id || ''} ${el.getAttribute('name') || ''}`);
 
   const all = [];
   const walk = root => { for (const el of root.querySelectorAll('*')) { all.push(el); if (el.shadowRoot) walk(el.shadowRoot); } };
@@ -163,6 +182,40 @@
     consumed.add(el);
   }
 
+  // Ashby yes/no button pairs.
+  for (const box of all.filter(e => e.matches('.ashby-application-form-input-yesno'))) {
+    if (!visible(box) || excluded(box)) continue;
+    const group = [...box.querySelectorAll('button[aria-pressed],button')].filter(visible);
+    if (!group.length) continue;
+    group.forEach(b => consumed.add(b));
+    box.querySelectorAll('input').forEach(i => consumed.add(i));
+    const title = box.closest('.ashby-application-form-field-entry')?.querySelector('.ashby-application-form-question-title');
+    const q = title ? clean(title.innerText) : label(box, { visibleFirst: true });
+    const pressed = group.find(b => b.getAttribute('aria-pressed') === 'true');
+    push(box, { label: q, type: 'buttonchoice', options: group.map(b => clean(b.innerText)),
+      required: /\*/.test(q) || !!(title && /required/i.test(title.className)),
+      value: pressed ? clean(pressed.innerText) : '', maxlength: -1, valid: true });
+    consumed.add(box);
+  }
+
+  // Checkboxes sharing one name are one multiple-choice question (Lever, Greenhouse).
+  const boxNames = {};
+  for (const c of all.filter(e => e.matches('input[type=checkbox][name]'))) {
+    (boxNames[c.name] = boxNames[c.name] || []).push(c);
+  }
+  for (const [name, group] of Object.entries(boxNames)) {
+    if (group.length < 2 || excluded(group[0])) continue;
+    const shown = group.filter(c => visible(c) || (c.labels && c.labels[0] && visible(c.labels[0])));
+    if (!shown.length) continue;
+    group.forEach(c => consumed.add(c));
+    const parent = group[0].closest('.application-question,fieldset,[role=group]');
+    const q = clean(parent?.querySelector('.application-label,legend')?.innerText || '') || label(group[0]) || name;
+    const req = group.some(c => c.required || c.getAttribute('aria-required') === 'true') || /\*/.test(q);
+    const value = group.filter(c => c.checked).map(c => label(c)).join('\n');
+    push(group[0], { label: q, type: 'checkboxgroup', options: group.map(c => label(c)), required: req,
+      value, maxlength: -1, valid: !req || !!value });
+  }
+
   // Oracle Candidate Experience pills and generic aria-pressed button groups.
   const pillGroups = new Set();
   for (const b of all.filter(e => e.matches('button[aria-pressed],[role=button][aria-pressed]'))) {
@@ -198,7 +251,7 @@
     'input,select,textarea,[role=combobox],[role=radiogroup],[role=checkbox],[role=switch],' +
     'button[aria-haspopup=listbox],[role=button][aria-haspopup=listbox]'));
   for (const el of controls) {
-    if (consumed.has(el) || el.closest('[data-automation-id="multiselectInputContainer"]')) continue;
+    if (consumed.has(el) || el.closest('[data-automation-id="multiselectInputContainer"]') || excluded(el)) continue;
     const role = el.getAttribute('role');
     let type = ['combobox', 'radiogroup'].includes(role) ? role : (el.type || el.tagName.toLowerCase());
     if (el.matches('[aria-haspopup=listbox]') && !el.matches('input,[role=combobox]')) type = 'dropdown';
@@ -216,7 +269,8 @@
         if (!plugin) continue;
         widget = 'proxy';
       } else if (type === 'checkbox' || type === 'radio') {
-        const lab = el.labels && el.labels[0];
+        const lab = (el.labels && el.labels[0])
+          || byId(el, (el.getAttribute('aria-labelledby') || '').split(/\s+/)[0] || '_');
         if (!lab || !visible(lab)) continue;
         widget = 'label';
       } else continue;
@@ -250,11 +304,17 @@
       type = 'select'; options = [...el.options].filter(x => !x.disabled && x.value !== '').map(x => x.text);
       value = el.selectedOptions[0]?.text || '';
       if (value && el.selectedOptions[0]?.value === '') value = '';
+    } else if (type === 'combobox' && !value) {
+      // react-select keeps the chosen value outside the input.
+      const chosen = el.closest('.select__control')?.querySelectorAll('.select__single-value,.select__multi-value__label') || [];
+      value = [...chosen].map(x => clean(x.textContent)).filter(Boolean).join(', ');
     } else if (type === 'checkbox') {
       value = el.matches('input') ? (el.checked ? 'true' : 'false') : (el.getAttribute('aria-checked') === 'true' ? 'true' : 'false');
     } else if (type === 'file') {
       value = [...(el.files || [])].map(x => x.name).join(', ');
-      if (!/resume|cv\b|curriculum/i.test(question)) {
+      const identifier = `${el.id || ''} ${el.getAttribute('name') || ''}`;
+      if (/cover.?letter/i.test(identifier) && !/cover.?letter/i.test(question)) question = 'Cover Letter';
+      else if (!/resume|cv\b|curriculum/i.test(question)) {
         let node = el.parentElement, hint = '';
         for (let i = 0; i < 6 && node && !hint; i++, node = node.parentElement) {
           const t = clean(node.innerText || '').slice(0, 300);
@@ -262,7 +322,8 @@
           if (/resume|\bcv\b|curriculum/i.test(t)) hint = 'Resume/CV';
         }
         if (!hint && /resume|cv/i.test((el.dataset.automationId || '') + (el.name || '') + (el.id || ''))) hint = 'Resume/CV';
-        if (hint) question = hint + ' (' + question + ')';
+        // A generic visible label ("Attach", "Upload") is replaced; a specific one is kept as context.
+        if (hint) question = /^(?:attach|upload|choose|browse|select|add)(?: (?:a )?file)?$|^unlabelled field$/i.test(question) || question === el.id || question === el.name ? hint : hint + ' (' + question + ')';
       }
     }
     // Secrets never leave the page: the model, traces and events only see that a value exists.
@@ -275,6 +336,7 @@
   const fieldIds = new Set(fields.map(f => f.id));
   const buttons = all.filter(el => el.matches('button,a,[role=button],input[type=submit],input[type=button]'))
     .filter(el => !consumed.has(el) && !fieldIds.has(el.dataset.jpId) && visible(el) && !el.disabled
+      && !el.closest('[inert],[aria-hidden="true"]') && !el.closest(CAPTCHA_BOX)
       && el.getAttribute('aria-disabled') !== 'true' && !el.matches('[aria-haspopup=listbox]'))
     .map(el => ({
       id: id(el),
@@ -282,6 +344,11 @@
       href: el.getAttribute('href') || '', type: el.form ? (el.type || '') : '',
       automation_id: el.dataset.automationId || '', aria_label: el.getAttribute('aria-label') || '',
     })).filter(x => x.label);
+  // The start (headings, questions) and the end (confirmations, footers' errors) of long pages.
+  const bodyText = () => {
+    const t = document.body ? document.body.innerText : '';
+    return t.length > 20000 ? t.slice(0, 15000) + '\n' + t.slice(-5000) : t;
+  };
   const headings = [...document.querySelectorAll('h1,h2,h3,[role=heading]')].filter(visible)
     .map(x => clean(x.innerText)).filter(Boolean).slice(0, 15);
   const errors = [...new Set([...document.querySelectorAll(ERR + ',[data-automation-id="errorBanner"]')]
@@ -290,8 +357,20 @@
     .map(x => x.dataset.automationId))].slice(0, 400);
   const busy = [...document.querySelectorAll('[aria-busy=true],[data-automation-id="loadingSpinner"],.oj-progress-circle,.spinner,.loading-spinner,.loader')]
     .some(visible);
+  // Open modal dialogs (Workday "Reset Password", terms pop-ups): their controls take precedence.
+  const dialogs = [...document.querySelectorAll('[role=dialog],[role=alertdialog],[aria-modal=true],dialog[open],[data-automation-id="popUpDialog"],[data-automation-id="wd-Popup"]')]
+    .filter(d => visible(d) && !d.closest(CAPTCHA_BOX) && d.getBoundingClientRect().width > 120)
+    .map(d => ({
+      title: clean(d.querySelector('h1,h2,h3,[role=heading]')?.innerText || d.getAttribute('aria-label') || ''),
+      text: clean(d.innerText).slice(0, 4000),
+      automation: [...new Set([...d.querySelectorAll('[data-automation-id]')].filter(visible).map(x => x.dataset.automationId))].slice(0, 100),
+      field_ids: fields.filter(f => { const n = document.querySelector('[data-jp-id="' + f.id + '"]'); return n && d.contains(n); }).map(f => f.id),
+      control_ids: buttons.filter(b => { const n = document.querySelector('[data-jp-id="' + b.id + '"]'); return n && d.contains(n); }).map(b => b.id),
+    }))
+    .filter(d => d.field_ids.length || d.control_ids.length);
   return {
-    fields, buttons, document_id: W.__jpDocId, text: document.body ? document.body.innerText.slice(0, 20000) : '',
+    dialogs,
+    fields, buttons, document_id: W.__jpDocId, text: bodyText(),
     title: document.title, headings, errors, automation, busy, url: location.href,
   };
 }

@@ -4,6 +4,7 @@ import re
 from datetime import date
 
 from .models import structured
+from .knowledge import applicable, question_text, relevant_fact, topic
 from .schemas import Answer, AnswerBatch, Profile
 
 
@@ -86,7 +87,13 @@ CONTACT = {
     },
     "website": {"website", "portfolio", "portfolio url", "personal website", "website url", "portfolio link"},
     "github": {"github", "github url", "github profile", "github link", "github profile url"},
-    "location": {"location", "current location", "location city", "where are you located"},
+    "location": {
+        "location",
+        "current location",
+        "location city",
+        "where are you located",
+        "where are you currently based",
+    },
 }
 NAMES = {
     "first": {"first name", "given name", "legal first name", "first name legal", "first"},
@@ -121,7 +128,7 @@ EDUCATION = {
     "end": re.compile(r"^to\b|end|last year|graduat|to year|completion|expected", re.I),
 }
 DEMOGRAPHIC = re.compile(
-    r"gender|ethnicity|race\b|veteran|disabilit|sexual orientation|hispanic|latino|pronoun|transgender|lgbt",
+    r"gender|ethnic|race\b|racial|veteran|disabilit|sexual orientation|hispanic|latino|pronoun|transgender|lgbt",
     re.IGNORECASE,
 )
 DECLINE = re.compile(
@@ -131,10 +138,10 @@ DECLINE = re.compile(
 )
 CRITICAL = re.compile(
     r"sponsor|authoriz|visa|citizen|convict|criminal|government|public (?:institution|sector)|"
-    r"nda\b|non.?disclosure|corrupt|restrictive|non.?compete|referr|consent|agree|certify",
+    r"nda\b|non.?disclosure|corrupt|restrictive|non.?compete|referr|consent|agree|certify|export.?control|sanction|embargo",
     re.IGNORECASE,
 )
-# Checkbox commitments accepted when profile.auto_accept_consents is on.
+# Routine acknowledgements (reported in the consent ledger; acceptance follows the profile policy).
 STANDARD_CONSENT = re.compile(
     r"privacy (?:policy|notice|statement)|terms (?:and|&) conditions|terms of (?:use|service)|data (?:privacy|protection|processing)|"
     r"(?:read|reviewed|understand|acknowledge|accept|agree)\b.{0,80}\b(?:policy|notice|statement|terms|conditions|consent)|"
@@ -232,10 +239,24 @@ INTENTS = [
             r"how did you (?:hear|learn|find)|where did you (?:hear|find|learn)|source of (?:application|referral)",
             re.I,
         ),
-        ["referral_source"],
+        ["application_source"],
     ),
     (re.compile(r"pronoun", re.I), ["pronouns"]),
 ]
+
+
+US_STATES = {
+    "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas", "CA": "California",
+    "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware", "DC": "District of Columbia",
+    "FL": "Florida", "GA": "Georgia", "HI": "Hawaii", "ID": "Idaho", "IL": "Illinois", "IN": "Indiana",
+    "IA": "Iowa", "KS": "Kansas", "KY": "Kentucky", "LA": "Louisiana", "ME": "Maine", "MD": "Maryland",
+    "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota", "MS": "Mississippi", "MO": "Missouri",
+    "MT": "Montana", "NE": "Nebraska", "NV": "Nevada", "NH": "New Hampshire", "NJ": "New Jersey",
+    "NM": "New Mexico", "NY": "New York", "NC": "North Carolina", "ND": "North Dakota", "OH": "Ohio",
+    "OK": "Oklahoma", "OR": "Oregon", "PA": "Pennsylvania", "RI": "Rhode Island", "SC": "South Carolina",
+    "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas", "UT": "Utah", "VT": "Vermont",
+    "VA": "Virginia", "WA": "Washington", "WV": "West Virginia", "WI": "Wisconsin", "WY": "Wyoming",
+}
 
 
 def month_year(value):
@@ -260,7 +281,7 @@ def yes_no(value):
 
 class Resolver:
     def __init__(
-        self, profile: Profile, db, config, run_id=None, employer="", resume_text="", job=None, kb=None
+        self, profile: Profile, db, config, run_id=None, employer="", job=None, resume_text="", kb=None
     ):
         self.profile, self.db, self.config = profile, db, config
         self.run_id, self.employer = run_id, employer
@@ -294,8 +315,9 @@ class Resolver:
         label = normalize(f["label"])
         options = f.get("options", [])
         p = self.profile
+        employer = f.get("employer", self.employer)
         key = answer_key({**f, "employer": f.get("employer", self.employer)})
-        if key in p.approved_answers:
+        if key in p.approved_answers and topic(f["label"]) != "source":
             value = option_value(p.approved_answers[key], options)
             if value is not None:
                 return Answer(
@@ -305,16 +327,60 @@ class Resolver:
                     disposition="answer",
                     reason="Exact approved question and option set",
                 )
-        if self.kb:
-            hit = self.kb.lookup(f["label"], options, self.employer, f.get("type", ""))
+        for reviewed in reversed(p.reviewed_answers):
+            if (
+                topic(f["label"]) != "source"
+                and applicable(reviewed, employer)
+                and question_text(reviewed.question) == question_text(f["label"])
+            ):
+                value = option_value(reviewed.answer, options)
+                if value is not None:
+                    return Answer(
+                        field_id=f["id"],
+                        value=value,
+                        evidence_ids=["reviewed:" + reviewed.id],
+                        disposition="answer",
+                        reason="Previously confirmed answer",
+                    )
+        if self.kb and topic(f["label"]) != "source":
+            # Paraphrases of a confirmed answer (scope, negation and comparators preserved).
+            hit = self.kb.lookup(f["label"], options, employer, f.get("type", ""))
             if hit:
                 entry, value = hit
                 return Answer(
                     field_id=f["id"],
                     value=value,
-                    evidence_ids=["kb:" + entry["id"]],
+                    evidence_ids=["reviewed:" + entry.id],
                     disposition="answer",
-                    reason="Answer from your knowledge base",
+                    reason="Previously confirmed answer",
+                )
+        if topic(f["label"]) == "source" and p.application_source and f.get("options_partial"):
+            # Search-driven pickers (Workday prompts) find the leaf ("Job Boards › LinkedIn") by name.
+            return Answer(
+                field_id=f["id"], value=p.application_source, evidence_ids=["policy:source"], disposition="answer"
+            )
+        if topic(f["label"]) == "source" and p.application_source:
+            value = option_value(p.application_source, options)
+            if value is None:
+                value = next((o for o in options if p.application_source.casefold() in o.casefold()), None)
+            if value is None:
+                if p.application_source.casefold() == "linkedin":
+                    value = next(
+                        (o for o in options if normalize(o) in {"job board", "job boards"}), None
+                    )
+            if value is None:
+                value = next(
+                    (
+                        o
+                        for o in options
+                        if normalize(o)
+                        in {"social media", "social network", "job board", "job boards", "other"}
+                    ),
+                    None,
+                )
+            if value is not None:
+                return Answer(
+                    field_id=f["id"], value=value, evidence_ids=["policy:source"], disposition="answer"
                 )
         if DEMOGRAPHIC.search(label) and p.decline_demographics and f.get("type") != "checkbox":
             decline = next((x for x in options if DECLINE.search(x)), None)
@@ -344,8 +410,13 @@ class Resolver:
             if label in labels and (value := getattr(p, attr)):
                 if attr == "phone" and options:
                     continue
-                if a := self._ans(f, value, ["profile:" + attr]):
-                    return a
+                candidates = [value]
+                if attr == "location" and (label in {"location city"} or f.get("type") == "combobox"):
+                    # Location type-aheads search by city; "New York, NY" often returns nothing.
+                    candidates.insert(0, value.split(",")[0].strip())
+                for candidate in candidates:
+                    if a := self._ans(f, candidate, ["profile:" + attr]):
+                        return a
         first, last = p.given_names()
         names = {"first": first, "last": last, "middle": p.middle_name, "preferred": p.preferred_name or ""}
         for part, labels in NAMES.items():
@@ -377,6 +448,17 @@ class Resolver:
         if label in ADDRESS["city"] and not addr.city and p.location:
             if a := self._ans(f, p.location.split(",")[0].strip(), ["profile:location"]):
                 return a
+        region = p.location.rsplit(",", 1)[1].strip() if "," in p.location else ""
+        if label in ADDRESS["state"] and not addr.state and region:
+            for candidate in [US_STATES.get(region.upper(), region), region]:
+                if a := self._ans(f, candidate, ["profile:location"]):
+                    return a
+        if label in ADDRESS["country"] | {"what is your current country of residence"} and not addr.country:
+            country = p.facts.get("country_of_residence") or p.facts.get("country")
+            if not country and (region.upper() in US_STATES or region in US_STATES.values()):
+                country = "United States"
+            if country and (a := self._ans(f, str(country), ["profile:location"])):
+                return a
         if re.search(r"phone.*(?:device|type)|type of phone|phone type", label) and p.phone_type:
             if a := self._ans(f, p.phone_type, ["profile:phone_type"]):
                 return a
@@ -389,21 +471,27 @@ class Resolver:
             local = digits[2:] if digits.startswith("+1") and len(digits) == 12 else digits
             return Answer(field_id=f["id"], value=local, disposition="answer", evidence_ids=["profile:phone"])
         if f.get("type") == "checkbox":
-            if f["label"] in p.approved_consents:
+            all_terms = p.accept_all_application_terms and bool(
+                re.search(
+                    r"agree|accept|consent|acknowledge|certify|terms|privacy|policy|authoriz|confirm|data process",
+                    f["label"],
+                    re.I,
+                )
+            )
+            routine_consent = (
+                p.allow_application_consents
+                and bool(
+                    re.search(
+                        r"privacy (?:policy|notice)|process.{0,30}(?:personal|application) data|accuracy.{0,30}(?:application|information)|information.{0,30}(?:true|accurate)",
+                        f["label"],
+                        re.I,
+                    )
+                )
+                and not re.search(r"marketing|arbitration|waiv|background|credit check", f["label"], re.I)
+            )
+            if f["label"] in p.approved_consents or routine_consent or all_terms:
                 return Answer(
                     field_id=f["id"], value="true", disposition="answer", evidence_ids=["policy:consent"]
-                )
-            if (
-                p.auto_accept_consents
-                and STANDARD_CONSENT.search(f["label"])
-                and not MARKETING.search(f["label"])
-            ):
-                return Answer(
-                    field_id=f["id"],
-                    value="true",
-                    disposition="answer",
-                    evidence_ids=["policy:standard_consent"],
-                    reason="Standard privacy/terms acknowledgement accepted by policy",
                 )
             if MARKETING.search(f["label"]) and not f["required"]:
                 return Answer(field_id=f["id"], disposition="skip", reason="Optional marketing opt-in")
@@ -487,7 +575,7 @@ class Resolver:
         facts = self._facts()
         p = self.profile
         extra = {
-            "referral_source": p.referral_source,
+            "application_source": p.application_source,
             "desired_salary": p.salary_expectation,
             "availability": p.availability,
         }
@@ -550,13 +638,28 @@ class Resolver:
                 facts[f"profile:education.{i}"] = e.model_dump()
             if self.profile.skills:
                 facts["profile:skills"] = self.profile.skills
+            if any(getattr(self.profile.address, k) for k in ("city", "state", "country")):
+                facts["profile:address"] = self.profile.address.model_dump()
+            if self.profile.accept_all_application_terms:
+                facts["fact:application_consent_policy"] = (
+                    "Applicant accepts all application terms, conditions, privacy notices, and consent requests."
+                )
+            if self.profile.application_source:
+                facts["fact:application_source_policy"] = self.profile.application_source
             evidence = {"evidence:" + e.id: e.text for e in self.profile.evidence}
             if self.resume_text:
                 evidence["resume:selected"] = self.resume_text[:12000]
-            if self.kb:
-                for f in pending:
-                    for entry in self.kb.similar(f["label"], self.employer, k=4):
-                        evidence["kb:" + entry["id"]] = f"Q: {entry['question']}\nA: {entry['answer']}"
+            learned = {
+                "reviewed:" + a.id: a for a in self.profile.reviewed_answers if applicable(a, self.employer)
+            }
+            if len(learned) > 40 and self.kb:
+                # Keep the prompt focused: confirmed answers most similar to these questions.
+                keep = {
+                    "reviewed:" + entry.id
+                    for f in pending
+                    for entry in self.kb.similar(f["label"], self.employer, k=6)
+                }
+                learned = {k: v for k, v in learned.items() if k in keep}
             questions = [
                 {
                     k: f.get(k)
@@ -587,15 +690,24 @@ class Resolver:
                 "Interpret negation, time scope, units, and employer definitions. A compliance commitment "
                 "is different from an adverse disclosure. No blanket No policy. Work authorization and "
                 "future sponsorship are separate facts. Government definitions including public universities "
-                "must be resolved using evidence. kb: entries are answers the applicant gave to similar "
-                "questions; reuse them only when the question asks the same thing. If evidence is missing, "
-                "disposition=review for required fields and skip for optional ones. Consent requires exact "
-                "prior approval. Choose only an offered option when options exist. Include supporting "
-                "evidence_ids on EVERY answer. For critical disclosures/eligibility use fact: or kb: evidence, "
-                "not inferred prose. For personal names use exact verified facts. For open-ended prose "
-                "(motivation, interest, 'tell us about') write 2-5 concise first-person sentences grounded in "
-                "resume:/evidence: and the job, within maxlength. Years of experience must be computed from "
-                "dated evidence, rounded down. Do not output arbitrary HTML or code."
+                "must be resolved using evidence. If a required fact is missing, disposition=review (the "
+                "applicant is asked once and the answer is saved); skip optional fields you cannot support. "
+                "Consent follows fact:application_consent_policy or exact prior approval; marketing opt-ins "
+                "are never accepted. 'How did you hear' follows fact:application_source_policy. Choose only "
+                "an offered option when options exist; when the fact is known, pick the closest valid "
+                "option. Include supporting evidence_ids on EVERY answer. For critical disclosures and "
+                "eligibility use fact: or reviewed fact evidence, never inferred prose. For personal names "
+                "use exact verified facts, never guess how to split a full name. The knowledge base has two "
+                "layers: confirmed_facts and confirmed_reviews are authoritative personal answers; "
+                "experience_stories and resume:selected support narratives. Reuse applicable reviewed facts "
+                "across paraphrases while respecting scope, negation, and time. A reviewed narrative is not "
+                "a new eligibility fact. Narrative questions (motivation, why this company or role, 'tell "
+                "us about', strengths) need NO approval: you choose the wording, examples and emphasis. "
+                "Write 2-5 concise first-person sentences grounded in the applicant's actual experience "
+                "and the supplied job context, within maxlength; cite the resume:/evidence: ids used. Never "
+                "invent personal facts, qualifications, employers, dates, identity, legal disclosures, "
+                "eligibility, or company facts. Years of experience are computed from dated evidence, "
+                "rounded down. Keep each reason under 15 words. Do not output arbitrary HTML or code."
             )
             job = {
                 "title": self.job.get("title", ""),
@@ -610,15 +722,16 @@ class Resolver:
                 json.dumps(
                     {
                         "employer": self.employer,
-                        "job": job,
-                        "facts": facts,
-                        "evidence": evidence,
+                        "job_context": job,
+                        "confirmed_facts": facts,
+                        "confirmed_reviews": {k: v.model_dump() for k, v in learned.items()},
+                        "experience_stories": evidence,
                         "questions": questions,
                     },
                     default=str,
                 ),
                 self.run_id,
-                max_tokens=min(3200, 400 + 220 * len(pending)),
+                min(3200, 400 + 220 * len(pending)),
             )
             by_id = {a.field_id: a for a in batch.answers}
             for f in pending:
@@ -627,10 +740,22 @@ class Resolver:
                     a = Answer(field_id=f["id"], disposition="review", reason="Model omitted this question")
                 if a.disposition == "answer":
                     valid_evidence = a.evidence_ids and all(
-                        x in facts or x in evidence or x.startswith("profile:") for x in a.evidence_ids
+                        x in facts
+                        or x in evidence
+                        or x in learned
+                        # "profile:work.0.title" cites a field of the supplied "profile:work.0".
+                        or any(x.startswith(k + ".") for k in facts if k.startswith("profile:"))
+                        for x in a.evidence_ids
                     )
                     critical_ok = not CRITICAL.search(f["label"]) or any(
-                        x.startswith(("fact:", "kb:")) for x in a.evidence_ids
+                        (x.startswith("fact:") and relevant_fact(f["label"], x[5:]))
+                        or (
+                            x in learned
+                            and learned[x].layer == "fact"
+                            and topic(f["label"])
+                            and topic(learned[x].question) == topic(f["label"])
+                        )
+                        for x in a.evidence_ids
                     )
                     value = None
                     if a.value is not None:

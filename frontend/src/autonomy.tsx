@@ -9,9 +9,10 @@ import {
   Trash2,
 } from "lucide-react";
 import type {
+  AccountRow,
   AccountSummary,
-  KnowledgeEntry,
   Profile,
+  ReviewedAnswer,
   Snapshot,
 } from "./types";
 
@@ -22,13 +23,29 @@ type Request = <T = any>(
 ) => Promise<T>;
 type Action = (fn: () => Promise<unknown>, success?: string) => Promise<void>;
 
-const when = (s: string) =>
+const when = (s: string | number) =>
   new Date(s).toLocaleString([], {
     month: "short",
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
   });
+
+const ACCOUNT_STATES: Record<string, string> = {
+  created_locally: "Created, not signed in yet",
+  signing_in: "Signing in",
+  authenticated: "Signed in",
+  verification_pending: "Waiting for email verification",
+  reset_requested: "Password reset requested",
+  password_reset: "Password reset",
+  exists: "Already registered",
+  locked: "Locked",
+};
+const accountState = (s: string) =>
+  ACCOUNT_STATES[s] || s.replace(/_/g, " ") || "Unknown";
+const accountHost = (a: AccountRow) =>
+  a.origin.replace(/^https?:\/\//, "") ||
+  a.id.replace(/^employer_account:/, "");
 
 export function AccountSettings({
   data,
@@ -53,8 +70,11 @@ export function AccountSettings({
         <div>
           <h2>Employer accounts</h2>
           <p className="muted">
-            One login for every portal. Accounts are created on first use; an
-            old password is reset through your mailbox.
+            One login for every portal: your login email with
+            APPLICATION_PASSWORD (ACCOUNT_PASSWORD is still accepted). If it is
+            unset, one strong password is generated once, encrypted, and reused
+            for every employer. Verification and reset emails are read from your
+            Gmail inbox.
           </p>
         </div>
         <KeyRound size={21} />
@@ -62,23 +82,36 @@ export function AccountSettings({
       <div className="limit-grid">
         <div>
           <small>Login email</small>
-          <strong>
-            {summary?.email || data.config.account_email || "Profile email"}
-          </strong>
+          <strong>{data.config.account_email || "Profile email"}</strong>
         </div>
         <div>
-          <small>ACCOUNT_PASSWORD</small>
-          <strong>{data.config.account ? "Configured" : "Missing"}</strong>
+          <small>APPLICATION_PASSWORD</small>
+          <strong>
+            {data.config.account ? "Set in .env" : "Generated and encrypted"}
+          </strong>
         </div>
         <div>
           <small>Gmail app password</small>
           <strong>{data.config.imap ? "Configured" : "Missing"}</strong>
         </div>
         <div>
+          <small>2Captcha</small>
+          <strong>{data.config.twocaptcha ? "Configured" : "Not set"}</strong>
+        </div>
+        <div>
           <small>Engine</small>
           <strong>{data.config.engine}</strong>
         </div>
       </div>
+      {!data.profile.allow_account_creation && (
+        <div className="note small">
+          <span>
+            Account creation is off. Turn on “Create and reuse employer
+            accounts” in Profile to let applications that require an account
+            continue.
+          </span>
+        </div>
+      )}
       {!!summary?.password_problems.length && (
         <div className="note small">
           <span>
@@ -93,13 +126,14 @@ export function AccountSettings({
           type="button"
           disabled={!data.config.imap}
           onClick={() =>
-            act(async () => {
-              const r = await request<{ folder: string }>(
-                "/inbox/check",
-                "POST",
-              );
-              return r;
-            }, "Gmail IMAP connection works")
+            act(
+              () =>
+                request<{ connected: boolean; folder: string; host: string }>(
+                  "/inbox/check",
+                  "POST",
+                ),
+              "Gmail IMAP connection works",
+            )
           }
         >
           <Mail size={16} /> Test Gmail connection
@@ -113,9 +147,8 @@ export function AccountSettings({
           <table>
             <thead>
               <tr>
-                <th>Employer realm</th>
+                <th>Employer</th>
                 <th>State</th>
-                <th>Password</th>
                 <th>Updated</th>
                 <th />
               </tr>
@@ -123,24 +156,29 @@ export function AccountSettings({
             <tbody>
               {summary.accounts.map((a) => (
                 <tr key={a.id}>
-                  <td>{a.realm.replace(/^\w+:/, "")}</td>
-                  <td>{a.state}</td>
+                  <td>{accountHost(a)}</td>
                   <td>
-                    {a.password_current
-                      ? "current"
-                      : a.resets
-                        ? `reset ${a.resets}×`
-                        : "unknown"}
+                    {accountState(a.state)}
+                    {a.reset_requested_at ? (
+                      <small className="muted">
+                        {" "}
+                        · reset requested {when(a.reset_requested_at * 1000)}
+                      </small>
+                    ) : null}
                   </td>
-                  <td>{when(a.updated_at)}</td>
+                  <td>{a.updated_at ? when(a.updated_at) : "—"}</td>
                   <td>
                     <button
                       className="icon-button"
-                      aria-label={"Forget " + a.realm}
+                      type="button"
+                      aria-label={"Forget " + accountHost(a)}
                       onClick={() =>
                         act(
                           () =>
-                            request("/accounts/" + a.id, "DELETE").then(load),
+                            request(
+                              "/accounts/" + encodeURIComponent(a.id),
+                              "DELETE",
+                            ).then(load),
                           "Account forgotten",
                         )
                       }
@@ -155,8 +193,8 @@ export function AccountSettings({
         </div>
       ) : (
         <p className="muted small">
-          No employer accounts yet. They appear here after the first
-          application.
+          No employer accounts yet. They appear here after the first application
+          that needs one.
         </p>
       )}
     </section>
@@ -170,12 +208,14 @@ export function LearnedAnswers({
   request: Request;
   act: Action;
 }) {
-  const [entries, setEntries] = useState<KnowledgeEntry[]>([]);
+  const [entries, setEntries] = useState<ReviewedAnswer[]>([]);
   const [q, setQ] = useState("");
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState("");
+  const [scope, setScope] = useState<ReviewedAnswer["scope"]>("personal");
+  const [employer, setEmployer] = useState("");
   const load = (text = q) =>
-    request<{ entries: KnowledgeEntry[] }>(
+    request<{ entries: ReviewedAnswer[] }>(
       "/knowledge?q=" + encodeURIComponent(text),
     )
       .then((r) => setEntries(r.entries))
@@ -189,8 +229,10 @@ export function LearnedAnswers({
         <div>
           <h2>Learned answers</h2>
           <p className="muted">
-            Answers you gave on Telegram or here. Reused for the same question
-            at any employer; employer names are matched as a placeholder.
+            Answers you gave on Telegram, in the review inbox, or here. Reusable
+            answers apply at every employer (employer names in a question are
+            matched as a placeholder); employer answers only where you gave
+            them.
           </p>
         </div>
         <Brain size={21} />
@@ -200,7 +242,13 @@ export function LearnedAnswers({
         onSubmit={(e) => {
           e.preventDefault();
           act(async () => {
-            await request("/knowledge", "POST", { question, answer });
+            await request("/knowledge", "POST", {
+              question,
+              answer,
+              options: [],
+              scope,
+              employer: scope === "employer" ? employer.trim() : "",
+            });
             setQuestion("");
             setAnswer("");
             await load();
@@ -219,6 +267,22 @@ export function LearnedAnswers({
           onChange={(e) => setAnswer(e.target.value)}
           required
         />
+        <select
+          aria-label="Applies to"
+          value={scope}
+          onChange={(e) => setScope(e.target.value as ReviewedAnswer["scope"])}
+        >
+          <option value="personal">All employers</option>
+          <option value="employer">One employer</option>
+        </select>
+        {scope === "employer" && (
+          <input
+            placeholder="Employer name"
+            value={employer}
+            onChange={(e) => setEmployer(e.target.value)}
+            required
+          />
+        )}
         <button className="button">
           <Plus size={16} /> Add
         </button>
@@ -239,7 +303,7 @@ export function LearnedAnswers({
               <tr>
                 <th>Question</th>
                 <th>Answer</th>
-                <th>Source</th>
+                <th>Applies to</th>
                 <th />
               </tr>
             </thead>
@@ -249,20 +313,26 @@ export function LearnedAnswers({
                   <td>{e.question}</td>
                   <td>{e.answer}</td>
                   <td>
-                    {e.scope === "global"
-                      ? e.source
-                      : e.source + " · " + e.scope.replace("employer:", "")}
+                    {e.scope === "personal"
+                      ? "All employers"
+                      : e.employer || "One employer"}
+                    <br />
+                    <small className="muted">
+                      {e.layer === "narrative" ? "Narrative" : "Confirmed fact"}
+                    </small>
                   </td>
                   <td>
                     <button
                       className="icon-button"
+                      type="button"
                       aria-label={"Forget " + e.question}
                       onClick={() =>
                         act(
                           () =>
-                            request("/knowledge/" + e.id, "DELETE").then(() =>
-                              load(),
-                            ),
+                            request(
+                              "/knowledge/" + encodeURIComponent(e.id),
+                              "DELETE",
+                            ).then(() => load()),
                           "Forgotten",
                         )
                       }
@@ -277,8 +347,9 @@ export function LearnedAnswers({
         </div>
       ) : (
         <p className="muted small">
-          Nothing learned yet. Unknown questions are asked on Telegram and saved
-          here.
+          {q
+            ? "No learned answers match this search."
+            : "Nothing learned yet. Unknown questions are asked on Telegram and saved here."}
         </p>
       )}
     </section>
@@ -339,7 +410,6 @@ export function ApplicationProfile({
           "+1 or United States of America",
         )}
         {text("phone_type", "Phone type", "Mobile")}
-        {text("referral_source", "How did you hear about us", "LinkedIn")}
         {text(
           "salary_expectation",
           "Salary expectation",
@@ -368,17 +438,6 @@ export function ApplicationProfile({
           </label>
         ))}
       </div>
-      <label className="checkline">
-        <input
-          type="checkbox"
-          checked={p.auto_accept_consents}
-          onChange={(e) => set("auto_accept_consents", e.target.checked)}
-        />
-        <span>
-          Accept standard privacy, terms and accuracy-certification checkboxes
-          automatically (never marketing or SMS opt-ins)
-        </span>
-      </label>
       <div className="section-top subsection">
         <h3>Work history and education</h3>
         <button

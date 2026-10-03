@@ -6,11 +6,13 @@ import os
 import pytest
 from sqlalchemy import select
 
-from jobpilot.db import Account, Event, Job, Run
+from jobpilot.accounts import AccountStore
+from jobpilot.db import Event, Job, Run
 from jobpilot.discovery import add_job
-from jobpilot.knowledge import upsert
+from jobpilot.knowledge import save
 from jobpilot.schemas import JobInput
 from mock_ats import MockICIMS, MockOracle, MockWorkday, Router
+from mock_ats.gmail import FakeGmail
 from mock_ats.portals import MockEmbeddedAccount, MockSuccessFactors, MockTaleo
 
 PASSWORD = "Str0ng!Pass#1"
@@ -49,6 +51,9 @@ PROFILE = {
             "end": "2021",
         }
     ],
+    "allow_account_creation": True,
+    "accept_all_application_terms": True,
+    "application_source": "LinkedIn",
     "facts": {
         "work_authorized_us": True,
         "requires_sponsorship": False,
@@ -60,7 +65,9 @@ PROFILE = {
 
 
 @pytest.fixture
-def harness(service, config, prepared, monkeypatch):
+async def harness(service, config, prepared, monkeypatch):
+    import asyncio
+
     calls = []
 
     async def no_model(*args, **kwargs):
@@ -91,16 +98,18 @@ def harness(service, config, prepared, monkeypatch):
                 raise
 
         monkeypatch.setattr(BrowserEngine, "run", traced)
-    inbox = []
-    service.inbox.fake = inbox
-    config.account_password = PASSWORD
+    inbox = FakeGmail(EMAIL).connect(service)
+    config.application_password = PASSWORD
     config.account_email = EMAIL
-    config.mail_wait_seconds = 10
+    config.mail_wait_seconds = 15
+    config.mail_poll_seconds = 0.2
     config.multipage_timeout = 240
     service.db.set_setting("profile", PROFILE)
     service.db.set_setting("control", {"paused": False, "auto_submit": True})
     # Learned on Telegram while applying to another employer; reused here without asking again.
-    upsert(service.db, "Do you have production experience with Kubernetes?", "Yes", ["Yes", "No"], "Globex")
+    save(service.db, "Do you have production experience with Kubernetes?", "Yes", ["Yes", "No"], "Globex")
+    # The background mailbox poller, as the app runs it.
+    poller = asyncio.create_task(service.mail.poll())
 
     async def run(site, url, mode="dry_run"):
         service.fixture_router = Router(site)
@@ -126,8 +135,9 @@ def harness(service, config, prepared, monkeypatch):
             with service.db.session() as s:
                 for r in s.scalars(select(Review).where(Review.run_id == row.id)):
                     print("REVIEW", r.question, r.options[:6], r.reason)
-            for kind, message in events:
-                print("EVENT", kind, message)
+            with service.db.session() as s:
+                for e in s.scalars(select(Event).where(Event.run_id == row.id)):
+                    print("EVENT", e.kind, e.message, json.dumps(e.data)[:600] if e.kind in {"verification", "field_error"} else "")
             for step in sorted((service.config.data_dir / "runs" / row.id / "steps").glob("*.json")):
                 data = json.loads(step.read_text())
                 print("STEP", step.name, data["headings"][:3], data["errors"][:3])
@@ -137,13 +147,14 @@ def harness(service, config, prepared, monkeypatch):
 
     run.inbox = inbox
     run.calls = calls
-    return run
+    yield run
+    poller.cancel()
+    await asyncio.gather(poller, return_exceptions=True)
 
 
-def account_state(service, realm):
-    with service.db.session() as s:
-        row = s.scalar(select(Account).where(Account.realm == realm))
-        return row.state if row else None
+def account_state(service, url):
+    record = service.db.get_setting(AccountStore(service, EMAIL).key(url), {})
+    return record.get("state")
 
 
 async def test_workday_new_account_email_verification_and_submit(harness, service):
@@ -152,7 +163,7 @@ async def test_workday_new_account_email_verification_and_submit(harness, servic
     assert result["state"] == "confirmed", result
     assert harness.calls == []
     assert site.accounts[EMAIL]["verified"] and site.accounts[EMAIL]["password"] == PASSWORD
-    assert account_state(service, "workday:" + site.host) == "active"
+    assert account_state(service, MockWorkday.job_url) == "authenticated"
     [submission] = site.submissions
     v = submission["values"]
     expected = {
@@ -210,17 +221,16 @@ async def test_workday_old_password_is_reset_through_the_mailbox(harness, servic
         print("ACCOUNTS", site.accounts, site.requests)
     assert result["state"] == "dry_run_passed", result
     assert site.accounts[EMAIL]["password"] == PASSWORD
-    assert account_state(service, "workday:" + site.host) in {"active", "reset"}
-    assert any("Resetting the employer password" in m for _, m in result["events"])
+    assert account_state(service, MockWorkday.job_url) in {"authenticated", "password_reset"}
+    assert any("password reset" in m.lower() for _, m in result["events"])
 
 
 MOTIVATION = "What interests you most about this role?"
 
 
 async def test_oracle_new_candidate_full_submit(harness, service):
-    upsert(
-        service.db, MOTIVATION, "Building reliable platforms that other engineers depend on.", [], "Globex"
-    )
+    # A narrative confirmed for this employer earlier.
+    save(service.db, MOTIVATION, "Building reliable platforms that other engineers depend on.", [], "Acme")
     site = MockOracle(harness.inbox)
     result = await harness(site, MockOracle.job_url, mode="submit")
     assert result["state"] == "confirmed", result
@@ -278,6 +288,16 @@ async def test_oracle_returning_candidate_pin_and_live_telegram_answer(harness, 
         return {"message_id": len(sent)}
 
     monkeypatch.setattr("jobpilot.telegram.api", fake_api)
+
+    async def interpret(config, db, schema, instructions, prompt, *args, **kwargs):
+        # The reply-interpretation model: the applicant's own words, quoted exactly.
+        from jobpilot.telegram import ReplyInterpretation
+
+        assert schema is ReplyInterpretation
+        reply = json.loads(prompt)["applicant_reply"]
+        return ReplyInterpretation(kind="answer", answer=reply, quote=reply)
+
+    monkeypatch.setattr("jobpilot.models.structured", interpret)
     site = MockOracle(harness.inbox)
     site.add_account(EMAIL, PASSWORD)
     result = await harness(site, MockOracle.job_url)
@@ -289,8 +309,12 @@ async def test_oracle_returning_candidate_pin_and_live_telegram_answer(harness, 
     assert any(kind == "answered" for kind, _ in result["events"])
     from jobpilot.knowledge import KnowledgeBase
 
-    hit = KnowledgeBase(service.db).lookup(MOTIVATION, [], "Another Corp", "text")
+    kb = KnowledgeBase(service.db)
+    hit = kb.lookup(MOTIVATION, [], "Acme", "text")
     assert hit and hit[1] == "Owning reliability for systems people rely on."
+    # A motivation is employer-specific: another employer gets it only as writing context.
+    assert kb.lookup(MOTIVATION, [], "Another Corp", "text") is None
+    assert kb.similar(MOTIVATION, "Another Corp") == []
 
 
 async def test_icims_new_account_hidden_selects_and_submit(harness, service):

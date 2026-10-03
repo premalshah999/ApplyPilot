@@ -54,7 +54,7 @@ class Workday(Adapter):
                 return name
         return ""
 
-    def classify(self, obs):
+    def classify_page(self, obs):
         auto = set(obs["automation"])
         text = obs["text"]
         if self.committed and CONFIRM_TEXT.search(text):
@@ -77,17 +77,13 @@ class Workday(Adapter):
             return Step.VERIFY_LINK
         if set(self.apply_ids) & auto and not self.committed:
             return Step.JOB
-        return super().classify(obs)
+        return super().classify_page(obs)
 
     async def on_apply_method(self, obs):
         by_id = {b["automation_id"]: b for b in obs["controls"] if b["automation_id"]}
         profile = self.e.profile
-        account = self.accounts.get(self.realm)
-        if (
-            "useMyLastApplication" in by_id
-            and account
-            and account["state"] in {"active", "verified", "reset"}
-        ):
+        account = self.accounts.record(self.page.url)
+        if "useMyLastApplication" in by_id and account.get("state") in {"authenticated", "password_reset"}:
             choice = by_id["useMyLastApplication"]
         elif "applyManually" in by_id and (profile.work or "autofillWithResume" not in by_id):
             choice = by_id["applyManually"]
@@ -99,6 +95,35 @@ class Workday(Adapter):
         self.emit("apply_method", f"Workday: {choice['label'] or choice['automation_id']}")
         await self.click(choice)
         self.apply_url = self.page.url
+
+    async def on_sign_in(self, obs):
+        return await self.workday_account()
+
+    async def on_create_account(self, obs):
+        return await self.workday_account()
+
+    async def workday_account(self):
+        """One Workday account implementation (WorkdayAuth) for both engines."""
+        from ..workday import WorkdayAuth
+
+        auth = getattr(self.e, "workday_auth", None) or WorkdayAuth(self.e)
+        self.e.workday_auth = auth
+        self.attempts["workday_auth"] += 1
+        if self.attempts["workday_auth"] > 2:
+            return self.defer("Workday kept returning to account access")
+        try:
+            ok = await auth.run()
+        except ValueError as exc:
+            state = "waiting_browser" if self.config.browser_cdp_url else "needs_review"
+            return {"state": state, "reason": str(exc)[:400], "reviews": []}
+        if self.e.result:
+            return self.e.result
+        if not ok:
+            return self.defer(
+                "Workday requires an account. Enable “Create and reuse employer accounts” in your profile."
+            )
+        self.e.workday_session_ok = True
+        return None
 
     async def on_form(self, obs):
         if self.page_name(obs) == "my experience":

@@ -111,6 +111,13 @@ NOT_APPLICATION = re.compile(
 )
 
 
+# Account states meaning "an account exists here": sign in rather than create.
+KNOWN_ACCOUNT = {
+    "created_locally", "signing_in", "authenticated", "verification_pending", "reset_requested",
+    "password_reset", "exists", "locked",
+}
+
+
 class Step(StrEnum):
     JOB = "job_details"
     METHOD = "apply_method"
@@ -119,6 +126,7 @@ class Step(StrEnum):
     CREATE_ACCOUNT = "create_account"
     VERIFY_LINK = "verify_link"
     EMAIL_CODE = "email_code"
+    RESET_PASSWORD = "reset_password"
     CONSENT = "consent"
     FORM = "form"
     REVIEW = "review"
@@ -146,15 +154,15 @@ class Adapter:
         self.e = engine
         self.service, self.config = engine.service, engine.config
         self.job, self.run_record = engine.job, engine.run_record
-        self.accounts = Accounts(self.service)
+        self.accounts = Accounts(self.service, engine.profile)
         self.inbox = self.service.inbox
-        self.realm = Accounts.realm(self.id, self.job["url"])
         self.signatures = Counter()
         self.attempts = Counter()
         self.step_no = 0
         self.challenge_since = time.time() - 90
-        self.mail_lock = None
+        self.challenge = None  # The open mail request window (MailService challenge).
         self.committed = False
+        self.before_commit = None
         self.post_commit_steps = 0
         self.apply_url = None
         self.last_step = None
@@ -293,6 +301,34 @@ class Adapter:
 
     # ----- classification -----------------------------------------------------------------------
     def classify(self, obs):
+        dialog = self.dialog_view(obs)
+        if dialog is not None:
+            # An open dialog (reset password, sign in, terms) is the step, not the page behind it.
+            return self.classify_page(dialog)
+        return self.classify_page(obs)
+
+    @staticmethod
+    def dialog_view(obs):
+        """The observation restricted to the top-most open modal dialog, if it holds controls."""
+        dialogs = [d for d in obs.get("dialogs", []) if d.get("field_ids") or d.get("control_ids")]
+        if not dialogs:
+            return None
+        top = dialogs[-1]
+        fields = [f for f in obs["fields"] if f["id"] in top["field_ids"]]
+        controls = [c for c in obs["controls"] if c["id"] in top["control_ids"]]
+        if not fields and not [c for c in controls if not re.fullmatch(r"close|x|×|cancel", c["label"], re.I)]:
+            return None
+        return {
+            **obs,
+            "fields": fields,
+            "controls": controls,
+            "text": top.get("text", ""),
+            "headings": [top["title"]] if top.get("title") else [],
+            "automation": top.get("automation", []),
+            "dialog": True,
+        }
+
+    def classify_page(self, obs):
         text = obs["text"]
         fields = self.app_fields(obs)
         passwords = [f for f in obs["fields"] if f["type"] == "password"]
@@ -310,6 +346,13 @@ class Adapter:
         codes = self.code_fields(obs)
         if codes:
             return Step.BLOCKED if SMS.search(text) else Step.EMAIL_CODE
+        if (
+            not passwords
+            and FORGOT.search(text + " " + " ".join(obs.get("headings", [])))
+            and [f for f in meaningful if f["type"] == "email" or re.search(r"e-?mail|user ?name", f["label"], re.I)]
+            and self.auth_button(obs, "reset")
+        ):
+            return Step.RESET_PASSWORD
         if passwords:
             # A sign-up form asks for the password twice.
             return Step.CREATE_ACCOUNT if len(passwords) >= 2 else Step.SIGN_IN
@@ -355,7 +398,9 @@ class Adapter:
             moved = self.handoff(obs["url"])
             if moved:
                 return {"handoff": moved}
-            step = self.classify(obs)
+            # Modal precedence: an open dialog is the current step; act only on its controls.
+            obs = self.dialog_view(obs) or obs
+            step = self.classify_page(obs)
             if self.committed and step not in {Step.CONFIRMATION, Step.ALREADY_APPLIED}:
                 self.post_commit_steps += 1
                 if self.post_commit_steps > 4:
@@ -456,9 +501,13 @@ class Adapter:
             return self.defer("The employer kept asking for email verification")
         token = await self.wait_email("link")
         if not token:
-            return self.defer("The verification email did not arrive in time")
+            return self.defer(self.mail_problem("verification link"))
+        if token["kind"] != "link":
+            self.finish_mail("failed", "Expected a verification link, received a code")
+            return self.defer("The employer sent a code where the page expected a link")
         await self.open_link(token["value"])
-        self.accounts.mark(self.realm, self.id, "verified")
+        self.finish_mail("verified", "Website accepted the verification link")
+        self.accounts.mark(self.page.url, "authenticated")
         self.emit("email_verified", "Employer email verification completed")
         await self.form.settle(timeout=8)
         obs = await self.form.scan()
@@ -479,24 +528,31 @@ class Adapter:
                 if re.search(r"resend|send (?:a )?new code|send again", b["label"], re.I)
             ]
             if resend and self.attempts["email_code"] == 1:
-                self.challenge_since = time.time() - 5
+                self.release_mail()
+                await self.arm_mail("code")
                 await self.click(resend[0], auth=True)
                 token = await self.wait_email("code")
             if not token:
-                return self.defer("The verification code email did not arrive in time")
+                return self.defer(self.mail_problem("verification code"))
         if token["kind"] != "code":
             await self.open_link(token["value"])
+            self.finish_mail("verified", "Website accepted the verification link")
             return None
         obs = await self.form.scan()
         fields = self.code_fields(obs)
         code = token["value"]
         if not fields:
+            self.finish_mail("failed", "Code field disappeared")
             return self.defer("A code arrived but the page no longer shows a code field")
         if len(fields) > 1 and len(fields) != len(code):
+            self.finish_mail("failed", "Code length mismatch")
             return self.defer("The code length does not match the website")
         for i, f in enumerate(fields):
+            frame_url = self.form.frames[f["id"]].url
+            if not self.accounts.password_allowed(self.id, frame_url, self.job["url"]):
+                self.finish_mail("failed", "Code field on an unexpected website")
+                return self.defer("The code field is on an unexpected website; not entering the code")
             await self.form.locator(f["id"]).fill(code if len(fields) == 1 else code[i], timeout=4000)
-        self.release_mail()
         await asyncio.sleep(0.3)
         obs = await self.form.scan()
         if self.code_fields(obs):
@@ -507,7 +563,17 @@ class Adapter:
             ]
             if confirm:
                 await self.click(confirm[-1], auth=True)
+        await self.form.settle(timeout=6)
+        after = await self.form.scan()
+        if self.code_fields(after) and self.signature(Step.EMAIL_CODE, after) == self.signature(Step.EMAIL_CODE, obs):
+            self.finish_mail("failed", "Website did not accept the code")
+            return None  # The loop sees the same step again and retries or defers.
+        self.finish_mail("verified", "Website accepted the verification code")
         self.emit("email_verified", "Entered the emailed verification code")
+
+    async def on_reset_password(self, obs):
+        """A reset dialog/page that asks for the account email (e.g. after Forgot password)."""
+        return await self.request_reset(obs, "The password reset was requested from this page")
 
     async def on_form(self, obs):
         report = await self.fill_page()
@@ -520,7 +586,8 @@ class Adapter:
             return await self.on_review(obs, report)
         if not nxt:
             return {"fallback": True, "reason": "No way forward from this page"}
-        await self.solve_captcha()
+        if challenge := await self.solve_captcha():
+            return challenge
         before = self.signature(Step.FORM, obs)
         await self.click(nxt, step=True)
         after = await self.form.scan()
@@ -562,20 +629,29 @@ class Adapter:
         return await self.commit(final)
 
     async def on_confirmation(self, obs):
-        receipt = await self.form.proof()
         if self.committed:
-            receipt = receipt or {"type": "explicit_confirmation_page", "url": self.page.url}
-            receipt["resume_sha256"] = self.run_record["packet"]["resume_sha"]
-            return {"state": "confirmed", "reason": "Website confirmation captured", "receipt": receipt}
-        return {
-            "state": "already_applied",
-            "reason": "The employer shows this application as already submitted",
-        }
+            receipt = await self.form.proof()
+            if receipt and receipt != self.before_commit:
+                receipt["resume_sha256"] = self.run_record["packet"]["resume_sha"]
+                return {"state": "confirmed", "reason": "Website confirmation captured", "receipt": receipt}
+            return None  # Wait for a confirmation that this submission produced.
+        # A confirmation-looking page this run did not produce is never recorded as an application.
+        return self.defer(
+            "The employer shows a confirmation, but this run did not submit; check whether you already applied",
+            [
+                {
+                    "question": "Confirm whether you already applied to this job",
+                    "options": [],
+                    "key": "manual",
+                    "reason": "Confirmation without a submission",
+                }
+            ],
+        )
 
     async def on_already_applied(self, obs):
         if self.committed:
             return await self.on_confirmation(obs)
-        return {"state": "already_applied", "reason": "You already applied to this job"}
+        return {"state": "already_applied", "reason": "The employer says you already applied to this job"}
 
     async def on_closed(self, obs):
         return {"state": "closed", "reason": "The posting is closed or no longer available"}
@@ -654,9 +730,13 @@ class Adapter:
         return None
 
     async def solve_captcha(self):
-        await self.e.captcha()
+        """None when the page is clear; a waiting_browser result when a check stays unsolved."""
+        return await self.e.solve_captcha()
 
     async def commit(self, final):
+        if challenge := await self.solve_captcha():
+            return challenge  # Unsolved check before anything was submitted.
+        self.before_commit = await self.form.proof()
         if not self.committed:
             self.service.reserve_submission(self.e.run_id)
         self.e.armed = True
@@ -667,55 +747,48 @@ class Adapter:
             except Exception:
                 pass
         self.emit("submitting", "Commit step started; automatic retries are disabled")
-        await self.solve_captcha()
-        started = time.time()
         await self.form.click(final["id"], step_control=True)
         for _ in range(40):
             await asyncio.sleep(0.5)
             receipt = await self.form.proof()
-            if receipt:
+            if receipt and receipt != self.before_commit:
                 receipt["resume_sha256"] = self.run_record["packet"]["resume_sha"]
                 return {"state": "confirmed", "reason": "Website confirmation captured", "receipt": receipt}
+            if rejection := await self.form.rejection():
+                return {
+                    "state": "failed",
+                    "reason": "Employer website explicitly rejected the submission",
+                    "receipt": rejection,
+                }
+            if await self.solve_captcha():
+                return {
+                    "state": "submission_unknown",
+                    "reason": "Submission attempted but a security check was not accepted; "
+                    "automatic resubmission is disabled",
+                }
             obs = await self.form.scan()
             step = self.classify(obs)
+            if step == Step.EMAIL_CODE:
+                return None  # Post-submit verification (e.g. Greenhouse security code).
             if step in {Step.FORM, Step.REVIEW} and self.app_fields(obs) and not obs["errors"]:
                 # Some ATSs show optional pages after the commit (survey, EEO). Continue the loop.
                 return None
             if obs["errors"] and step in {Step.FORM, Step.REVIEW}:
                 break
-        mailed = await self.confirmation_email(started)
-        if mailed:
-            return {"state": "confirmed", "reason": "Confirmation email received", "receipt": mailed}
+        # An authenticated acknowledgement email can still confirm it later (receipts.py).
         return {
             "state": "submission_unknown",
             "reason": "Submission attempted, but no explicit receipt was captured",
         }
 
-    async def confirmation_email(self, since):
-        if not self.inbox.configured:
-            return None
-        from ..inbox import FAMILY_SENDERS, host_matches
-
-        try:
-            messages = await self.inbox._fetch(since - 5)
-        except Exception:
-            return None
-        title = [t for t in re.split(r"\W+", (self.job.get("title") or "").lower()) if len(t) > 3][:4]
-        for m in messages:
-            blob = (m.subject + " " + m.text[:4000]).lower()
-            from_ats = host_matches(m.sender.rpartition("@")[2], FAMILY_SENDERS.get(self.id, []))
-            names_job = sum(t in blob for t in title) >= max(1, len(title) // 2)
-            if (
-                CONFIRM_TEXT.search(blob)
-                and names_job
-                and (from_ats or (self.job.get("company") or "").lower() in blob)
-            ):
-                return {"type": "confirmation_email", "subject": m.subject[:200], "received": m.received}
-        return None
-
     async def open_link(self, url):
-        self.e.verification_origins = None
-        await self.page.goto(url, wait_until="domcontentloaded", timeout=25000)
+        # Navigations during the link visit may only reach the employer rule's origins.
+        rule = (self.challenge or {}).get("rule") or {}
+        self.e.verification_origins = set(rule.get("link_origins", [])) or None
+        try:
+            await self.page.goto(url, wait_until="domcontentloaded", timeout=25000)
+        finally:
+            self.e.verification_origins = None
         await self.form.settle(timeout=8)
         # Remove tokens from the address bar before anything else observes the URL.
         try:
@@ -731,38 +804,61 @@ class Adapter:
         await self.page.goto(target, wait_until="domcontentloaded", timeout=25000)
 
     # ----- email ------------------------------------------------------------------------------
-    async def arm_mail(self):
-        """Mark the moment an email is triggered and hold this ATS's mail window."""
+    async def arm_mail(self, kind="auto"):
+        """Open the request window BEFORE the action that makes the employer send mail.
+
+        MailService serializes runs whose employers share a sender domain (the lease), so one
+        run can never consume another's code."""
         self.challenge_since = time.time() - 5
-        if self.mail_lock is None and self.inbox.configured:
-            lock = self.inbox.lock(self.id)
-            try:
-                await asyncio.wait_for(lock.acquire(), timeout=120)
-                self.mail_lock = lock
-            except TimeoutError:
-                self.emit("mail_wait", "Another application is verifying with the same sender; continuing")
+        if self.inbox.live(self.challenge) or not self.inbox.configured:
+            return
+        try:
+            self.challenge = await self.inbox.arm(
+                self.e.run_id, self.job, self.accounts.email, kind, since=self.challenge_since
+            )
+        except ValueError as exc:
+            self.challenge = None
+            self.emit("mail_wait", str(exc)[:200])
 
     def release_mail(self):
-        if self.mail_lock is not None:
-            self.mail_lock.release()
-            self.mail_lock = None
+        if self.inbox.live(self.challenge):
+            self.inbox.finish(self.challenge, "cancelled", "No email was needed")
+        self.challenge = None
+
+    def finish_mail(self, state, reason):
+        if self.challenge:
+            self.inbox.finish(self.challenge, state, reason)
+        self.challenge = None
+
+    def mail_problem(self, what):
+        reason = self.inbox.reason(self.challenge) if self.challenge else ""
+        if self.challenge is None and not self.mail_rule_known:
+            return f"No trusted sender is known for this employer's {what}; add a rule in Settings › Email"
+        return f"The {what} email did not arrive or was not unique" + (f" ({reason})" if reason else "")
+
+    @property
+    def mail_rule_known(self):
+        return bool(self.service.mail.rule_for(self.job["url"]))
 
     async def wait_email(self, kind):
-        host = urlsplit(self.page.url).hostname or urlsplit(self.job["url"]).hostname
+        if not self.inbox.live(self.challenge):
+            # The site may have sent the mail during navigation; the window starts before that.
+            self.challenge = None
+            try:
+                self.challenge = await self.inbox.arm(
+                    self.e.run_id, self.job, self.accounts.email, kind, since=self.challenge_since
+                )
+            except ValueError as exc:
+                self.emit("mail_wait", str(exc)[:200])
+                return None
+        if not self.challenge:
+            return None
+        self.service.mail.narrow(self.challenge["id"], kind)
         self.emit("email_wait", f"Waiting for the employer's verification {kind}")
-        token = await self.inbox.wait(
-            run_id=self.e.run_id,
-            since=self.challenge_since,
-            ats=self.id,
-            employer=self.job.get("company", ""),
-            host=host,
-            kind=kind,
-            timeout=self.config.mail_wait_seconds,
-            recipient=self.accounts.email,
-            exclusive=self.mail_lock is not None,
-        )
+        self.e.extend(min(self.config.mail_wait_seconds, 120))
+        token = await self.inbox.wait(self.challenge)
         if token:
-            self.release_mail()
+            self.emit("email_matched", "Matched a trusted verification email", {"kind": token["kind"]})
         return token
 
     # ----- accounts ---------------------------------------------------------------------------
@@ -776,18 +872,23 @@ class Adapter:
             "reason": reason,
         }
 
+    def auth_url(self, obs):
+        """The page that owns the password fields (the account belongs to that origin)."""
+        passwords = [f for f in obs["fields"] if f["type"] == "password"]
+        # The observation may be older than the page (a failed sign-in reloads it).
+        return (passwords[0].get("frame_url") if passwords else None) or self.page.url
+
     async def authenticate(self, obs, mode):
         if not self.accounts.ready:
+            return self.defer("Add your email to the profile so I can identify you to employers")
+        url = self.auth_url(obs)
+        record = self.accounts.record(url)
+        known = record.get("state") in KNOWN_ACCOUNT
+        if mode == "create" and not self.accounts.may_create and not known:
             return self.defer(
-                "This employer requires an account. Set ACCOUNT_PASSWORD (and ACCOUNT_EMAIL) in .env.",
-                [
-                    {
-                        "question": "Set ACCOUNT_PASSWORD so I can sign in or create employer accounts",
-                        "options": [],
-                        "key": "session",
-                        "reason": "Account required",
-                    }
-                ],
+                "This employer requires an account. Enable “Create and reuse employer accounts” in your profile.",
+                [{"question": "Allow account creation for employers that require one", "options": [],
+                  "key": "session", "reason": "Account required"}],
             )
         self.attempts[mode] += 1
         if self.attempts[mode] > 2 or self.attempts["sign_in"] + self.attempts["create"] > 4:
@@ -797,11 +898,9 @@ class Adapter:
             frame_url = self.form.frames[f["id"]].url
             if not self.accounts.password_allowed(self.id, frame_url, self.job["url"]):
                 return self.defer("A password was requested on an unexpected website; not entering it")
-        account = self.accounts.get(self.realm)
         if (
             mode == "create"
-            and account
-            and account["state"] in {"created", "verified", "active", "reset", "exists"}
+            and known
             and not self.attempts["signin_switch"]
             and await self.switch(obs, SIGNIN_LINK)
         ):
@@ -809,8 +908,7 @@ class Adapter:
             self.attempts["signin_switch"] += 1
             self.attempts["create"] -= 1
             return None
-        if mode == "create" and not self.config.account_auto_create:
-            return self.defer("Account creation is disabled (ACCOUNT_AUTO_CREATE=false)")
+        credentials = self.accounts.credentials(url)
         # Identity fields on sign-up forms (name, country, consent) come from the profile.
         others = [
             f
@@ -835,9 +933,9 @@ class Adapter:
                     return self.defer("The account form needs an answer", [self.review_for(f, a.reason)])
         for f in obs["fields"]:
             if self.is_login_field(f):
-                await self.form.locator(f["id"]).fill(self.accounts.email, timeout=4000)
+                await self.form.locator(f["id"]).fill(credentials["email"], timeout=4000)
         for f in passwords:
-            await self.form.locator(f["id"]).fill(self.accounts.password, timeout=4000)
+            await self.form.locator(f["id"]).fill(credentials["password"], timeout=4000)
         button = self.auth_button(obs, mode)
         if not button:
             return {"fallback": True, "reason": "No sign-in control found"}
@@ -849,29 +947,31 @@ class Adapter:
             return await self.on_form(await self.form.scan())
         if mode == "create":
             await self.arm_mail()
-            self.accounts.mark(self.realm, self.id, "creating")
+            # Saved before the click: the same shared login, so a crash cannot lose it.
+            self.accounts.mark(url, "created_locally", credentials)
         await self.click(button, auth=True)
         outcome, detail = await self.auth_outcome()
-        self.emit("auth", f"{mode.replace('_', ' ')}: {outcome}", {"realm": self.realm})
+        self.emit("auth", f"{mode.replace('_', ' ')}: {outcome}")
         if outcome == "ok":
-            self.accounts.mark(self.realm, self.id, "created" if mode == "create" else "active")
+            self.release_mail()
+            self.accounts.mark(url, "authenticated", credentials)
             return None
         if outcome == "verify":
-            self.accounts.mark(self.realm, self.id, "created")
+            self.accounts.mark(url, "verification_pending", credentials)
             return None
+        self.release_mail()
         if outcome == "locked":
-            self.accounts.mark(self.realm, self.id, "locked", detail)
+            self.accounts.mark(url, "locked", credentials, error=detail[:200])
             return self.defer("The employer locked the account after failed sign-ins: " + detail)
         if outcome == "password_rules":
-            return self.defer("ACCOUNT_PASSWORD does not meet this employer's rules: " + detail)
+            return self.defer("The shared account password does not meet this employer's rules: " + detail)
         if outcome == "exists" and mode == "create":
-            self.accounts.mark(self.realm, self.id, "exists", detail)
+            self.accounts.mark(url, "exists", credentials)
             if await self.switch(obs, SIGNIN_LINK):
                 return None
             return await self.recover(obs, detail)
         if outcome == "bad_credentials" and mode == "sign_in":
-            known = account and account["state"] in {"created", "verified", "active", "reset"}
-            if not known and self.config.account_auto_create and self.attempts["create"] == 0:
+            if not known and self.accounts.may_create and self.attempts["create"] == 0:
                 if await self.switch(obs, CREATE_LINK):
                     return None
             return await self.recover(obs, detail)
@@ -944,22 +1044,28 @@ class Adapter:
         return True
 
     async def recover(self, obs, detail):
-        """Forgot-password with the mailbox, then set the shared password. Once per realm per run."""
-        if not self.config.account_password_reset or not self.inbox.configured or self.attempts["reset"]:
+        """Forgot-password through the connected mailbox, then set the shared password.
+
+        Requested once per employer per run and at most once every five minutes; a reset whose
+        email never arrived does not count against the limit. Saved credentials are kept until
+        the website confirms the new password."""
+        url = self.auth_url(obs)
+        record = self.accounts.record(url)
+        manual = [{"question": "Sign in to this employer and import the browser session", "options": [],
+                   "key": "session", "reason": detail[:200]}]
+        if not self.config.account_password_reset or self.attempts["reset"]:
+            return self.defer(f"Could not sign in to this employer ({detail})", manual)
+        if not self.inbox.configured or not await self.inbox.rule(self.job, self.accounts.email):
+            # Without a trusted sender, a reset email could never be matched: do not burn a reset.
             return self.defer(
-                f"Could not sign in to this employer ({detail}). Reset the password to ACCOUNT_PASSWORD once, "
-                "or enable ACCOUNT_PASSWORD_RESET with Gmail connected.",
-                [
-                    {
-                        "question": "Sign in to this employer and import the browser session",
-                        "options": [],
-                        "key": "session",
-                        "reason": detail[:200],
-                    }
-                ],
+                f"Could not sign in ({detail}). Connect Gmail and an email rule for this employer to "
+                "recover the account automatically.",
+                manual,
             )
-        if self.accounts.resets_used(self.realm) >= 3:
-            return self.defer("Password resets for this employer are exhausted; sign in manually once")
+        if time.time() - record.get("reset_requested_at", 0) < 300:
+            return self.defer("A password reset was requested recently; retry in five minutes", manual)
+        if record.get("resets", 0) >= 3:
+            return self.defer("Password resets for this employer are exhausted; sign in manually once", manual)
         self.attempts["reset"] += 1
         obs = await self.form.scan()
         forgot = [b for b in obs["controls"] if FORGOT.search(b["label"])]
@@ -971,45 +1077,67 @@ class Adapter:
             return self.defer(f"Could not sign in ({detail}) and no password reset was offered")
         self.emit("auth", "Resetting the employer password through your mailbox")
         await self.click(forgot[0], auth=True)
-        obs = await self.form.scan()
-        for f in obs["fields"]:
-            if self.is_login_field(f):
-                await self.form.locator(f["id"]).fill(self.accounts.email, timeout=4000)
-        button = self.auth_button(obs, "reset")
+        await self.form.settle(timeout=6)
+        return await self.request_reset(await self.form.scan(), detail)
+
+    async def request_reset(self, obs, detail):
+        """Explicit reset-email step: fill the email, open the request window, click, then wait."""
+        url = self.auth_url(obs) if any(f["type"] == "password" for f in obs["fields"]) else self.page.url
+        view = self.dialog_view(obs) or obs
+        emails = [f for f in view["fields"] if self.is_login_field(f)]
+        if not emails:
+            return self.defer("The password reset step has no email field")
+        for f in emails:
+            await self.form.locator(f["id"]).fill(self.accounts.email, timeout=4000)
+        button = self.auth_button(view, "reset")
         if not button:
-            return self.defer("The password reset page had no submit control")
-        await self.arm_mail()
+            return self.defer("The password reset step has no submit control")
+        self.release_mail()
+        await self.arm_mail("password_reset")
+        if not self.challenge:
+            return self.defer("The reset email could not be matched safely right now; retry later")
+        previous = self.accounts.saved(url)
+        self.accounts.mark(url, "reset_requested", previous, reset_requested_at=time.time())
         await self.click(button, auth=True)
-        token = await self.wait_email("auto")
+        self.emit("auth", "Employer password reset requested")
+        token = await self.wait_email("password_reset")
         if not token:
-            return self.defer("The password reset email did not arrive in time")
-        if token["kind"] == "link":
-            await self.open_link(token["value"])
-        else:
-            obs = await self.form.scan()
-            for i, f in enumerate(fields := self.code_fields(obs)):
-                await self.form.locator(f["id"]).fill(
-                    token["value"] if len(fields) == 1 else token["value"][i]
-                )
+            reason = self.inbox.reason(self.challenge)
+            self.finish_mail("failed", "No reset email")
+            # Nothing was delivered: allow another request after the cooldown, keep the count.
+            return self.defer("The password reset email did not arrive or was not unique" + (f" ({reason})" if reason else ""))
+        self.emit("auth", "Employer password reset email received")
+        if token["kind"] != "link":
+            self.finish_mail("failed", "Reset email had no link")
+            return self.defer("The reset email did not contain a usable link")
+        await self.open_link(token["value"])
         obs = await self.form.scan()
         passwords = [f for f in obs["fields"] if f["type"] == "password"]
         if not passwords:
+            self.finish_mail("failed", "Reset link did not open a password form")
             return self.defer("The password reset link did not open a new-password form")
+        credentials = self.accounts.store.shared()
         for f in passwords:
             if not self.accounts.password_allowed(self.id, self.form.frames[f["id"]].url, self.job["url"]):
+                self.finish_mail("failed", "Reset form on an unexpected website")
                 return self.defer("The reset page is on an unexpected website; not entering the password")
-            await self.form.locator(f["id"]).fill(self.accounts.password, timeout=4000)
+            await self.form.locator(f["id"]).fill(credentials["password"], timeout=4000)
         button = self.auth_button(obs, "reset")
         if not button:
+            self.finish_mail("failed", "No new-password submit control")
             return self.defer("The new-password form had no submit control")
         await self.click(button, auth=True)
         outcome, detail = await self.auth_outcome()
-        self.emit("auth", f"reset: {outcome}", {"detail": detail[:200]})
+        self.emit("auth", f"reset: {outcome}")
         if outcome == "password_rules":
-            return self.defer("ACCOUNT_PASSWORD does not meet this employer's rules: " + detail)
+            self.finish_mail("failed", "Password rules")
+            return self.defer("The shared account password does not meet this employer's rules: " + detail)
         if outcome != "ok":
+            self.finish_mail("failed", "New password not accepted")
             return self.defer("The employer did not accept the new password: " + (detail or outcome))
-        self.accounts.mark(self.realm, self.id, "reset")
+        self.finish_mail("verified", "Employer accepted the password reset")
+        record = self.accounts.record(url)
+        self.accounts.mark(url, "password_reset", credentials, resets=record.get("resets", 0) + 1)
         self.attempts["sign_in"] = self.attempts["create"] = 0
         self.emit("auth", "Password reset to the shared account password")
         await self.form.settle(timeout=6)

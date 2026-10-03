@@ -175,6 +175,7 @@ def create_app(config: Settings | None = None):
     @app.get("/api/snapshot")
     async def snapshot():
         day = datetime.now(ZoneInfo(config.timezone)).date().isoformat()
+        profile = Profile.model_validate(db.get_setting("profile", {}))
         with db.session() as s:
             jobs = [record(x) for x in s.scalars(select(Job).order_by(Job.created_at.desc()).limit(1000))]
             runs = [
@@ -185,10 +186,16 @@ def create_app(config: Settings | None = None):
                 {k: v for k, v in record(x).items() if k not in {"text", "filename"}}
                 for x in s.scalars(select(Resume).where(Resume.demo.is_(False)))
             ]
-            reviews = [
-                record(x)
-                for x in s.scalars(select(Review).where(Review.answer.is_(None)).order_by(Review.created_at))
-            ]
+            reviews = (
+                []
+                if profile.autonomous
+                else [
+                    record(x)
+                    for x in s.scalars(
+                        select(Review).where(Review.answer.is_(None)).order_by(Review.created_at)
+                    )
+                ]
+            )
             budget = s.get(Budget, day)
             spend, submissions = (budget.spent, budget.submissions) if budget else (0, 0)
             sources = [record(x) for x in s.scalars(select(Source))]
@@ -211,7 +218,7 @@ def create_app(config: Settings | None = None):
             "resumes": resumes,
             "reviews": reviews,
             "sources": sources,
-            "profile": Profile.model_validate(db.get_setting("profile", {})).model_dump(),
+            "profile": profile.model_dump(),
             "control": db.get_setting("control"),
             "ats": catalog(),
             "stats": {
@@ -237,11 +244,11 @@ def create_app(config: Settings | None = None):
                 "capsolver": bool(config.capsolver_api_key),
                 "engine": config.engine,
                 "multipage_timeout": config.multipage_timeout,
-                "account": bool(config.account_password),
-                "account_email": config.login_email or "",
+                "account": bool(config.application_password),
+                "account_email": config.account_email or profile.email,
                 "imap": bool(config.gmail_address and config.gmail_app_password),
+                "twocaptcha": bool(config.twocaptcha_api_key),
                 "telegram_wait": config.telegram_wait_seconds,
-                "auto_requeue": config.auto_requeue,
             },
         }
 
@@ -252,12 +259,19 @@ def create_app(config: Settings | None = None):
             from .db import Setting
 
             row = s.get(Setting, "profile")
-            value = data.model_dump()
+            # Keys this dashboard does not edit (or does not know yet) are kept, never dropped.
+            value = {**(row.value if row else {}), **data.model_dump()}
             if row:
                 value["approved_answers"] = {
                     **row.value.get("approved_answers", {}),
                     **value["approved_answers"],
                 }
+                value["reviewed_answers"] = list(
+                    {
+                        a["id"]: a
+                        for a in [*value["reviewed_answers"], *row.value.get("reviewed_answers", [])]
+                    }.values()
+                )
                 row.value = value
             else:
                 s.add(Setting(key="profile", value=value))
@@ -272,11 +286,28 @@ def create_app(config: Settings | None = None):
             await resume(service)
         return data
 
+    @app.post("/api/profile/organize")
+    async def organize_profile():
+        from .knowledge import organize
+
+        return await organize(db, config)
+
     @app.post("/api/jobs")
     async def import_job(data: JobInput):
         await public_url(data.url, config.allow_private_urls)
         row, created = add_job(db, data)
-        return {"job": row, "created": created}
+        result = {"job": row, "created": created}
+        profile = db.get_setting("profile", {})
+        if created and profile.get("autonomous") and db.get_setting("control", {}).get("auto_submit"):
+            try:
+                await rank(db, config, row["id"])
+                with db.session() as s:
+                    result["job"] = record(s.get(Job, row["id"]))
+                if result["job"]["status"] == "ready":
+                    result["run"] = await service.queue(row["id"], "submit")
+            except (ValueError, RuntimeError) as exc:
+                result["notice"] = str(exc)[:300]
+        return result
 
     @app.post("/api/jobs/{job_id}/rank")
     async def classify(job_id: str):
@@ -355,11 +386,15 @@ def create_app(config: Settings | None = None):
         service.reconcile(run_id, data.submitted, data.evidence)
         return {"reconciled": True}
 
+    @app.post("/api/runs/{run_id}/check-email")
+    async def check_email(run_id: str):
+        from .receipts import check_receipts
+
+        return await check_receipts(service.mail, run_id)
+
     @app.post("/api/reviews/{review_id}")
     async def review(review_id: str, data: AnswerInput):
-        result = service.answer_review(review_id, data.answer)
-        await service.after_answer(review_id)
-        return result
+        return await service.resolve_review(review_id, data.answer)
 
     @app.get("/api/knowledge")
     async def knowledge_list(q: str = ""):
@@ -369,10 +404,9 @@ def create_app(config: Settings | None = None):
 
     @app.post("/api/knowledge")
     async def knowledge_add(data: KnowledgeInput):
-        from .knowledge import upsert
+        from .knowledge import save
 
-        scope = None if data.scope == "global" else data.scope
-        return upsert(db, data.question, data.answer, data.options, source="dashboard", scope=scope)
+        return save(db, data.question, data.answer, data.options, data.employer, data.scope)
 
     @app.delete("/api/knowledge/{entry_id}")
     async def knowledge_delete(entry_id: str):
@@ -383,21 +417,23 @@ def create_app(config: Settings | None = None):
 
     @app.get("/api/accounts")
     async def accounts():
-        from .accounts import Accounts
+        from .accounts import summary
         from .config import password_problems
 
-        summary = Accounts(service).summary()
-        summary["password_problems"] = (
-            password_problems(config.account_password) if config.account_password else []
+        result = summary(service)
+        result["password_problems"] = (
+            password_problems(config.application_password) if config.application_password else []
         )
-        return summary
+        return result
 
     @app.delete("/api/accounts/{account_id}")
     async def account_forget(account_id: str):
-        from .db import Account
-
+        # Forgetting a record makes the next run sign in again or create the account; the
+        # shared login itself is kept.
+        if not account_id.startswith("employer_account:"):
+            raise HTTPException(404)
         with db.exclusive() as s:
-            row = s.get(Account, account_id)
+            row = s.get(Setting, account_id)
             if not row:
                 raise HTTPException(404)
             s.delete(row)
@@ -405,15 +441,23 @@ def create_app(config: Settings | None = None):
 
     @app.post("/api/inbox/check")
     async def inbox_check():
-        if not service.inbox.imap:
+        if not (config.gmail_address and config.gmail_app_password):
             raise ValueError("Set GMAIL_ADDRESS and GMAIL_APP_PASSWORD in .env, then restart")
+        from .gmail_imap import request
+
         try:
-            return await asyncio.to_thread(service.inbox.imap.check)
+            await asyncio.to_thread(
+                request,
+                config.gmail_address.strip().lower(),
+                "".join(config.gmail_app_password.split()),
+                "/profile",
+            )
         except Exception as exc:
             # imaplib errors carry the server's reply, never the password.
             raise ValueError(
                 f"Gmail IMAP login failed: {type(exc).__name__}. Check the app password and IMAP access."
             ) from None
+        return {"connected": True, "folder": "INBOX", "host": "imap.gmail.com"}
 
     @app.post("/api/profile/extract")
     async def profile_extract(resume_id: str = ""):

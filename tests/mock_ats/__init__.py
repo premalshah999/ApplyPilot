@@ -6,11 +6,9 @@ validation, submission) so adapters can be exercised end to end without contacti
 import json
 import re
 import secrets
-import time
 from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit
 
-from jobpilot.inbox import Message
 
 HERE = Path(__file__).parent
 SHELL = """<!doctype html><html lang="en"><head><meta charset="utf-8"><title>{title}</title>
@@ -59,18 +57,7 @@ class MockSite:
         self.requests = []
 
     def mail(self, to, sender, subject, text, link=None, link_text="Verify"):
-        self.inbox.append(
-            Message(
-                key="mock-" + secrets.token_hex(6),
-                received=time.time(),
-                sender=sender,
-                recipients=[to],
-                subject=subject,
-                text=text,
-                links=[(link, link_text)] if link else [],
-                authenticated=True,
-            )
-        )
+        self.inbox.deliver(to, sender, subject, text, link, link_text)
 
     def add_account(self, email, password, verified=True):
         self.accounts[email.lower()] = {"password": password, "verified": verified}

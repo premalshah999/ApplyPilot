@@ -114,6 +114,8 @@ def main():
     verify.add_argument("--timeout", type=int, default=420, help="Total queue wait budget in seconds")
     login = sub.add_parser("login", help="Capture an employer session using your own local browser")
     login.add_argument("url")
+    desktop = sub.add_parser("browser", help="Open the local application browser for Docker workers")
+    desktop.add_argument("--port", type=int, default=9224)
     args = parser.parse_args()
     config = settings()
     if args.command == "token":
@@ -136,6 +138,22 @@ def main():
         asyncio.run(probe(config, args.url, args.company))
     elif args.command == "trace":
         print_trace(config, args.run_id)
+    elif args.command == "browser":
+        import subprocess
+        from pathlib import Path
+        from playwright.sync_api import sync_playwright
+
+        chrome = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        with sync_playwright() as pw:
+            executable = config.chromium_path or (str(chrome) if chrome.exists() else pw.chromium.executable_path)
+        profile = config.data_dir / "desktop-browser"
+        profile.mkdir(parents=True, exist_ok=True, mode=0o700)
+        subprocess.Popen(
+            [executable, f"--remote-debugging-port={args.port}", "--remote-debugging-address=127.0.0.1",
+             f"--user-data-dir={profile}", "--no-first-run", "--no-default-browser-check", "about:blank"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+        print("Application browser opened. Leave this Chrome window open while applications run.")
     elif args.command == "verify":
         import sys
 
@@ -173,23 +191,28 @@ def main():
             ("CapSolver (optional)", bool(config.capsolver_api_key)),
             ("Gmail app password (OTP/links)", bool(config.gmail_address and config.gmail_app_password)),
             ("Gmail OAuth (optional)", bool(config.google_client_id and config.google_client_secret)),
-            ("Employer account password", bool(config.account_password)),
+            ("TWOCAPTCHA image fallback (optional)", bool(config.twocaptcha_api_key)),
+            ("Employer account password (else generated once)", bool(config.application_password)),
         ]:
             print(f"{'READY' if ready else 'MISSING':7} {label}")
         from .config import password_problems
 
-        if config.account_password and (problems := password_problems(config.account_password)):
-            print("WARN    ACCOUNT_PASSWORD: " + "; ".join(problems))
-        print(f"        Account email: {config.login_email or '(profile email)'} · engine: {config.engine}")
+        if config.application_password and (problems := password_problems(config.application_password)):
+            print("WARN    APPLICATION_PASSWORD: " + "; ".join(problems))
+        print(f"        Account email: {config.account_email or '(profile email)'} · engine: {config.engine}")
         if args.check_mail and config.gmail_address and config.gmail_app_password:
-            from .inbox import IMAPBackend
+            from .gmail_imap import request
 
             try:
-                info = IMAPBackend(config).check()
-                print(f"READY   IMAP login to {info['host']} ({info['folder']})")
+                request(
+                    config.gmail_address.strip().lower(),
+                    "".join(config.gmail_app_password.split()),
+                    "/profile",
+                )
+                print("READY   Gmail IMAP login (read-only)")
             except Exception as exc:
                 print(
-                    f"FAIL    IMAP login: {type(exc).__name__}. Check the app password and that IMAP is enabled."
+                    f"FAIL    Gmail IMAP login: {type(exc).__name__}. Check the app password and that IMAP is enabled."
                 )
         print(
             f"{config.workers} workers · {config.application_timeout}s budget · {config.daily_application_limit} submissions/day"

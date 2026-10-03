@@ -58,6 +58,33 @@ def seed(service, employer="https://careers.example.test", *, run_id="a" * 32):
         return record(box), record(run)
 
 
+def test_greenhouse_security_code_email_with_footer_numbers():
+    msg = message(
+        "Copy and paste this code into the security code field on your application: a1BcDeFG After you enter the code, resubmit your application. © 2026 Greenhouse New York NY 10013"
+    )
+    token = extract_message(
+        msg,
+        {"sender_domains": ["notify.example.test"], "link_origins": []},
+        {
+            "recipient": "alex@example.test",
+            "since": time.time() - 30,
+            "expires": time.time() + 30,
+            "kind": "code",
+        },
+    )
+    assert token == {"kind": "code", "value": "a1BcDeFG"}
+
+
+def test_password_reset_is_scoped_to_explicit_challenge_and_trusted_origin():
+    msg = message('<a href="https://careers.example.test/reset?token=secret">Reset your password</a>', html=True)
+    rule = {"sender_domains": ["notify.example.test"], "link_origins": ["https://careers.example.test"]}
+    challenge = {"recipient": "alex@example.test", "since": time.time() - 30,
+                 "expires": time.time() + 30, "kind": "password_reset"}
+    assert extract_message(msg, rule, challenge)["kind"] == "link"
+    assert extract_message(msg, rule, {**challenge, "kind": "auto"}) is None
+    assert extract_message(msg, {**rule, "link_origins": ["https://another.example.test"]}, challenge) is None
+
+
 async def configured(service, **kwargs):
     box, run = seed(service, **kwargs)
     rule = await service.mail.save_rule(
@@ -366,3 +393,24 @@ def test_lower_authentication_header_cannot_override_receiving_failure():
         "kind": "code",
     }
     assert extract_message(msg, rule, challenge) is None
+
+
+async def test_unknown_ats_mail_rule_learned_from_authenticated_employer_link(service):
+    seed(service)
+    msg=message('<p>Your verification code is 483921</p><a href="https://careers.example.test/verify?token=secret">Verify email</a>',html=True)
+    service.mail.transport=provider([msg])
+    rule=await service.mail.discover_rule({'url':'https://careers.example.test/job/123'},'alex@example.test',time.time()-30)
+    assert rule['sender_domains']==['notify.example.test']
+    assert rule['link_origins']==['https://careers.example.test']
+
+
+async def test_unknown_ats_mail_cannot_learn_from_unrelated_or_spoofed_messages(service):
+    seed(service)
+    job={'url':'https://careers.example.test/job/123'}
+    for msg in [message(),message('<a href="https://other.example.test/verify?token=secret">Verify</a>',html=True)]:
+        service.mail.transport=provider([msg])
+        assert await service.mail.discover_rule(job,'alex@example.test',time.time()-30) is None
+    msg=message('<a href="https://careers.example.test/verify?token=secret">Verify email</a>',html=True)
+    msg['payload']['headers'][2]['value']='mx.google.com; dmarc=fail header.from=notify.example.test'
+    service.mail.transport=provider([msg])
+    assert await service.mail.discover_rule(job,'alex@example.test',time.time()-30) is None

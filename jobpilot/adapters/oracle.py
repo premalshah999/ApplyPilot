@@ -15,7 +15,7 @@ class Oracle(Adapter):
     name = "Oracle Recruiting"
     next_ids = ("apply-flow-next", "next-button")
 
-    def classify(self, obs):
+    def classify_page(self, obs):
         text = obs["text"]
         if CONFIRM_TEXT.search(text) and (self.committed or "Apply Now" not in text):
             if len([f for f in obs["fields"] if f["type"] != "checkbox"]) <= 1:
@@ -27,7 +27,7 @@ class Oracle(Adapter):
         emails = [f for f in fields if f["type"] == "email" or re.search(r"e-?mail", f["label"], re.I)]
         if emails and len(fields) == len(emails) and any(TERMS.search(f["label"]) for f in obs["fields"]):
             return Step.EMAIL_ENTRY
-        return super().classify(obs)
+        return super().classify_page(obs)
 
     def code_fields(self, obs):
         found = super().code_fields(obs)

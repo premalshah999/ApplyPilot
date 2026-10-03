@@ -239,7 +239,7 @@ function App() {
   const nav = [
     ["Overview", Gauge],
     ["Applications", Layers3],
-    ["Review inbox", ShieldCheck],
+    ...(!data.profile.autonomous ? [["Review inbox", ShieldCheck] as const] : []),
     ["Resumes", FileText],
     ["Knowledge base", UserRound],
     ["Sources", Radio],
@@ -554,12 +554,19 @@ function Overview({
       `${data.config.workers} parallel workers`,
       Activity,
     ],
-    [
-      "Needs your input",
-      data.reviews.length,
-      "Answers awaiting review",
-      ShieldCheck,
-    ],
+    data.profile.autonomous
+      ? [
+          "Skipped",
+          data.runs.filter((r) => r.state === "skipped").length,
+          "Missing evidence or unsuitable forms",
+          ShieldCheck,
+        ] as const
+      : [
+          "Needs your input",
+          data.reviews.length,
+          "Answers awaiting review",
+          ShieldCheck,
+        ] as const,
     [
       "Model spend",
       money(data.stats.spend_today),
@@ -794,6 +801,8 @@ function Applications({
           ? [
               "review",
               "needs_review",
+              "waiting_answer",
+              "waiting_browser",
               "submission_unknown",
               "timed_out",
               "failed",
@@ -1166,10 +1175,9 @@ function Reviews({
         <span>
           <strong>Every answer has a scope.</strong>
           <p>
-            An approved answer is reused only for the same employer, question,
-            section, and options. After resolving all reviews, approve and
-            requeue the job in Applications. Authentication reviews also need an
-            imported session.
+            Confirmed personal answers can be reused across employers. Company-specific
+            answers stay with that employer. The application resumes when all its
+            questions are answered. Login problems may still need a connected mailbox or session.
           </p>
         </span>
       </div>
@@ -1193,7 +1201,7 @@ function ReviewCard({
         e.preventDefault();
         act(
           () => api("/reviews/" + q.id, "POST", { answer }),
-          "Answer saved. You can requeue the application.",
+          "Answer saved to your knowledge base.",
         );
       }}
     >
@@ -1382,8 +1390,11 @@ function Knowledge({ initial, act }: { initial: Profile; act: Action }) {
             }
             if (!f || Array.isArray(f) || typeof f !== "object")
               throw new Error("Verified facts must be a JSON object");
+            // Learned answers are managed through /knowledge; an empty list keeps the
+            // stored ones, so answers forgotten there are not restored by a stale copy.
             await api("/profile", "PUT", {
               ...p,
+              reviewed_answers: [],
               ...parseHistory(history),
               facts: f,
               evidence: evidence
@@ -1483,7 +1494,7 @@ function Knowledge({ initial, act }: { initial: Profile; act: Action }) {
           </section>
           <section className="panel form-panel">
             <div className="section-top">
-              <h2>Verified facts</h2>
+              <h2>Layer 1 · Confirmed facts</h2>
               <ShieldCheck size={19} />
             </div>
             <p className="muted">
@@ -1507,6 +1518,62 @@ function Knowledge({ initial, act }: { initial: Profile; act: Action }) {
                 }
               </pre>
             </details>
+            <Field title="Where you heard about jobs">
+              <input
+                value={p.application_source}
+                onChange={(e) => set("application_source", e.target.value)}
+                placeholder="LinkedIn"
+              />
+            </Field>
+            <label className="checkline">
+              <input
+                type="checkbox"
+                checked={p.allow_account_creation}
+                onChange={(e) =>
+                  set("allow_account_creation", e.target.checked)
+                }
+              />
+              <span>
+                Create and reuse employer accounts when an application requires
+                one
+              </span>
+            </label>
+            <label className="checkline">
+              <input
+                type="checkbox"
+                checked={p.autonomous}
+                onChange={(e) => set("autonomous", e.target.checked)}
+              />
+              <span>
+                Apply autonomously: skip applications with missing required
+                facts and continue to the next job
+              </span>
+            </label>
+            <label className="checkline">
+              <input
+                type="checkbox"
+                checked={p.accept_all_application_terms}
+                onChange={(e) =>
+                  set("accept_all_application_terms", e.target.checked)
+                }
+              />
+              <span>
+                Accept all application terms, conditions, and consent requests
+              </span>
+            </label>
+            <label className="checkline">
+              <input
+                type="checkbox"
+                checked={p.allow_application_consents}
+                onChange={(e) =>
+                  set("allow_application_consents", e.target.checked)
+                }
+              />
+              <span>
+                Accept application privacy notices and certify the accuracy of
+                saved information
+              </span>
+            </label>
             <div className="note small">
               <span>
                 Answer disclosure questions from facts. “No convictions” does
@@ -1527,10 +1594,28 @@ function Knowledge({ initial, act }: { initial: Profile; act: Action }) {
                 }
               />
             </Field>
-            <small className="muted">
-              {Object.keys(p.approved_answers).length} exact answers saved from
-              your review inbox.
-            </small>
+            <details>
+              <summary>
+                {p.reviewed_answers.length} answers learned from your reviews
+              </summary>
+              {p.reviewed_answers.map((a) => (
+                <div className="note small" key={a.id}>
+                  <span>
+                    <strong>{a.question}</strong>
+                    <br />
+                    {a.answer}
+                    <br />
+                    <small>
+                      {a.layer === "narrative" ? "Narrative" : "Confirmed fact"}{" "}
+                      ·{" "}
+                      {a.scope === "personal"
+                        ? "Reusable across employers"
+                        : a.employer}
+                    </small>
+                  </span>
+                </div>
+              ))}
+            </details>
           </section>
         </div>
         <ApplicationProfile
@@ -1544,11 +1629,12 @@ function Knowledge({ initial, act }: { initial: Profile; act: Action }) {
         <section className="panel form-panel subsection">
           <div className="section-top">
             <div>
-              <h2>Experience & answer evidence</h2>
+              <h2>Layer 2 · Experience, stories & narratives</h2>
               <p className="muted">
                 Projects, achievements, education, and clear examples your
-                worker can cite. Separate notes with a line containing three
-                dashes (---).
+                worker uses to write answers about your achievements, tools, and
+                interest in each role. Separate notes with a line containing
+                three dashes (---).
               </p>
             </div>
             <FileText size={21} />
@@ -1569,6 +1655,22 @@ function Knowledge({ initial, act }: { initial: Profile; act: Action }) {
           </span>
           <button className="button primary">
             <Check size={16} /> Save knowledge base
+          </button>
+          <button
+            type="button"
+            className="button"
+            onClick={() =>
+              act(async () => {
+                const result = await api<{ profile: Profile }>(
+                  "/profile/organize",
+                  "POST",
+                );
+                setP((x) => ({ ...x, ...result.profile }));
+                setFacts(JSON.stringify(result.profile.facts, null, 2));
+              }, "AI organized your saved knowledge base")
+            }
+          >
+            Organize saved facts with AI
           </button>
         </div>
       </form>
