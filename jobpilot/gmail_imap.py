@@ -79,9 +79,7 @@ def _request(client, address, path, params):
         query = str(params.get("q", "newer_than:1d"))
         # Quote the IMAP search value as a string; never permit injected search commands.
         query = (
-            '"'
-            + query.replace("\\", "\\\\").replace('"', '\\"').replace("\r", " ").replace("\n", " ")
-            + '"'
+            '"' + query.replace("\\", "\\\\").replace('"', '\\"').replace("\r", " ").replace("\n", " ") + '"'
         )
         status, data = client.uid("search", None, "X-GM-RAW", query)
         if status != "OK":
@@ -106,9 +104,7 @@ def _request(client, address, path, params):
         raise ValueError("Gmail message unavailable")
     date_match = re.search(rb'INTERNALDATE "([^"]+)"', item[0])
     received = (
-        datetime.strptime(date_match[1].decode(), "%d-%b-%Y %H:%M:%S %z")
-        if date_match
-        else datetime.now(UTC)
+        datetime.strptime(date_match[1].decode(), "%d-%b-%Y %H:%M:%S %z") if date_match else datetime.now(UTC)
     )
     msg = email.message_from_bytes(item[1], policy=policy.default)
     return {

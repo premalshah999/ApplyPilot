@@ -39,7 +39,10 @@ def test_generic_employer_acknowledgements_with_unique_company():
         "created_at": datetime.fromtimestamp(time.time() - 30, UTC).isoformat(),
     }
     cases = [
-        ("My Funded Futures", "Thanks for applying to MyFunded Futures. Our team will review your background shortly."),
+        (
+            "My Funded Futures",
+            "Thanks for applying to MyFunded Futures. Our team will review your background shortly.",
+        ),
         ("Zip Co", "Thank you for your application to Zip. Your application landed successfully."),
     ]
     for company, body in cases:

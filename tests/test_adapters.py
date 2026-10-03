@@ -137,7 +137,12 @@ async def harness(service, config, prepared, monkeypatch):
                     print("REVIEW", r.question, r.options[:6], r.reason)
             with service.db.session() as s:
                 for e in s.scalars(select(Event).where(Event.run_id == row.id)):
-                    print("EVENT", e.kind, e.message, json.dumps(e.data)[:600] if e.kind in {"verification", "field_error"} else "")
+                    print(
+                        "EVENT",
+                        e.kind,
+                        e.message,
+                        json.dumps(e.data)[:600] if e.kind in {"verification", "field_error"} else "",
+                    )
             for step in sorted((service.config.data_dir / "runs" / row.id / "steps").glob("*.json")):
                 data = json.loads(step.read_text())
                 print("STEP", step.name, data["headings"][:3], data["errors"][:3])
@@ -404,9 +409,13 @@ class DecoyOracle(MockOracle):
 
     def mail(self, to, sender, subject, text, link=None, link_text="Verify"):
         self.inbox.deliver(to, sender, subject, "Your verification code is 111111.", authenticated=False)
-        self.inbox.deliver(to, "no-reply@oraclecloud.com.evil.test", subject, "Your verification code is 222222.")
+        self.inbox.deliver(
+            to, "no-reply@oraclecloud.com.evil.test", subject, "Your verification code is 222222."
+        )
         self.inbox.deliver("someone@example.test", sender, subject, "Your verification code is 333333.")
-        self.inbox.deliver(to, "no-reply@globex.fa.oraclecloud.com", subject, "Your verification code is 444444.")
+        self.inbox.deliver(
+            to, "no-reply@globex.fa.oraclecloud.com", subject, "Your verification code is 444444."
+        )
         if self.genuine:
             super().mail(to, sender, subject, text, link, link_text)
 
@@ -422,7 +431,12 @@ async def test_regression_decoy_codes_are_never_entered(harness, service):
     site.add_account(EMAIL, PASSWORD)
     result = await harness(site, MockOracle.job_url)
     assert result["state"] == "dry_run_passed", result
-    assert len(site.pin_attempts) == 1 and site.pin_attempts[0] not in {"111111", "222222", "333333", "444444"}
+    assert len(site.pin_attempts) == 1 and site.pin_attempts[0] not in {
+        "111111",
+        "222222",
+        "333333",
+        "444444",
+    }
     assert site.submissions == []
 
 

@@ -15,7 +15,8 @@ FINAL = re.compile(
 )
 ENTRY = re.compile(
     r"^(?:apply(?: now| for (?:this|the) (?:job|position))?|start (?:your )?application|"
-    r"continue application|i.m interested|apply manually|autofill with resume)$", re.I
+    r"continue application|i.m interested|apply manually|autofill with resume)$",
+    re.I,
 )
 AUTH = re.compile(r"password|verification code|one.time|authentication code|security code", re.IGNORECASE)
 RESUME = re.compile(r"resume|cv\b|curriculum", re.IGNORECASE)
@@ -133,7 +134,9 @@ class FormSession:
                     identity = await owner.evaluate("e=>[e.title,e.id,e.src?.slice(0,200)].join(' ')")
                     # CAPTCHA widgets (Skip, Refresh Challenge, accessibility) are never applicant
                     # fields or navigation; the CAPTCHA solver owns them.
-                    if PROVIDER_FRAME.search(identity) or re.search(r"hcaptcha|recaptcha|challenge", identity, re.I):
+                    if PROVIDER_FRAME.search(identity) or re.search(
+                        r"hcaptcha|recaptcha|challenge", identity, re.I
+                    ):
                         continue
                 data = await asyncio.wait_for(frame.evaluate(SCAN), timeout=5)
             except Exception:
@@ -224,9 +227,7 @@ class FormSession:
         if named:
 
             def rank(f):
-                own = RESUME.search(f.get("name", "")) or RESUME.search(
-                    f["label"].split(" (")[0]
-                )
+                own = RESUME.search(f.get("name", "")) or RESUME.search(f["label"].split(" (")[0])
                 return (bool(AUTOFILL.search(f["label"] + " " + f.get("name", ""))), not own)
 
             return sorted(named, key=rank)[:1]
@@ -372,7 +373,9 @@ class FormSession:
 
             region = US_STATES.get(region.upper(), region).casefold()
             candidates = [
-                label for label in labels if value.casefold() in label.casefold() and region and region in label.casefold()
+                label
+                for label in labels
+                if value.casefold() in label.casefold() and region and region in label.casefold()
             ]
             if candidates:
                 value = candidates[0]
@@ -382,7 +385,9 @@ class FormSession:
             await exact.first.wait_for(state="visible", timeout=5000)
             await exact.first.click(timeout=5000)
         except Exception:
-            await widgets.wait_options(self.frames[field["id"]], None, timeout=3.0, selector='[role="option"]')
+            await widgets.wait_options(
+                self.frames[field["id"]], None, timeout=3.0, selector='[role="option"]'
+            )
             match = widgets.best_option([t.strip() for t in await options.all_text_contents()], value)
             if not match:
                 raise ValueError("Option is not offered") from None
@@ -620,7 +625,7 @@ class FormSession:
         problems = []
         greenhouse_resume = self.page.locator('.file-upload[aria-labelledby="upload-label-resume"]')
         if await greenhouse_resume.count():
-            filenames = await greenhouse_resume.locator('.file-upload__filename').all_text_contents()
+            filenames = await greenhouse_resume.locator(".file-upload__filename").all_text_contents()
             self.upload_verified = any(self.resume_path.name in name for name in filenames)
             if not self.upload_verified:
                 problems.append("Resume upload has not been accepted by the website")
@@ -704,7 +709,8 @@ class FormSession:
         if FINAL.search(button["label"]) and not allowed:
             raise ValueError("Use submit_application for final submission")
         entry = bool(ENTRY.fullmatch(button["label"])) and not any(
-            f["type"] not in {"search", "hidden"} and not re.search(r"search|keyword|location", f["label"], re.I)
+            f["type"] not in {"search", "hidden"}
+            and not re.search(r"search|keyword|location", f["label"], re.I)
             for f in self.fields.values()
         )
         # Never let a generic navigation action activate a bare HTML submit control.
@@ -717,14 +723,22 @@ class FormSession:
             raise ValueError("This may submit the application; use submit_application")
         opener = self.page
         opened = []
+
         def on_popup(page):
             opened.append(page)
+
         opener.on("popup", on_popup)
         el = self.locator(control_id)
         # Marked controls pass the page's submit guard: auth/step controls, entry links, and
         # ordinary navigation labels.
-        permitted = allowed or entry or bool(
-            re.fullmatch(r"next|continue|save (?:and|&) continue|review(?: application)?", button["label"], re.I)
+        permitted = (
+            allowed
+            or entry
+            or bool(
+                re.fullmatch(
+                    r"next|continue|save (?:and|&) continue|review(?: application)?", button["label"], re.I
+                )
+            )
         )
         if permitted:
             el = await el.element_handle()
@@ -751,7 +765,9 @@ class FormSession:
             opener.remove_listener("popup", on_popup)
             if permitted:
                 try:
-                    await el.evaluate("el => {delete el.dataset.jpAuthControl;const f=el.closest('form');if(f)delete f.dataset.jpAuthControl}")
+                    await el.evaluate(
+                        "el => {delete el.dataset.jpAuthControl;const f=el.closest('form');if(f)delete f.dataset.jpAuthControl}"
+                    )
                 except Exception:
                     pass
         # Only popups opened by this page: with a shared desktop browser, other workers' tabs
@@ -789,11 +805,14 @@ class FormSession:
             r"(?:we )?(?:couldn.t|could not|unable to) submit your application|"
             r"application submission was (?:flagged|rejected)|"
             r"your form needs corrections|missing entry for required field|"
-            r"your application (?:could not|couldn.t) be submitted", text, re.I
+            r"your application (?:could not|couldn.t) be submitted",
+            text,
+            re.I,
         )
         if match:
             return {
-                "type": "explicit_rejection_page", "url": self.page.url,
-                "evidence": text[max(0, match.start() - 20):match.end() + 400],
+                "type": "explicit_rejection_page",
+                "url": self.page.url,
+                "evidence": text[max(0, match.start() - 20) : match.end() + 400],
             }
         return None

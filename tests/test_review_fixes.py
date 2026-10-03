@@ -20,7 +20,12 @@ EMAIL = "alex@example.test"
 
 
 def form(page, service, tmp_path, profile=None):
-    return FormSession(page, Resolver(profile or Profile(), service.db, service.config), tmp_path / "Alex_Resume.pdf", lambda *a: None)
+    return FormSession(
+        page,
+        Resolver(profile or Profile(), service.db, service.config),
+        tmp_path / "Alex_Resume.pdf",
+        lambda *a: None,
+    )
 
 
 async def test_lever_radio_question_uses_its_application_label(page, service, tmp_path):
@@ -74,12 +79,16 @@ async def test_required_cover_letter_file_stops_before_submit(page, service, tmp
 
 
 def test_intents_never_answer_other_countries_current_salary_or_prose(service, config):
-    p = Profile(facts={"work_authorized_us": True, "requires_sponsorship": False, "willing_onsite": True},
-                salary_expectation="$150,000")
+    p = Profile(
+        facts={"work_authorized_us": True, "requires_sponsorship": False, "willing_onsite": True},
+        salary_expectation="$150,000",
+    )
     r = Resolver(p, service.db, config)
 
     def ask(label, options=("Yes", "No"), kind="select"):
-        return r.local({"id": "x", "label": label, "type": kind, "required": True, "options": list(options), "group": ""})
+        return r.local(
+            {"id": "x", "label": label, "type": kind, "required": True, "options": list(options), "group": ""}
+        )
 
     assert ask("Are you legally authorized to work in Canada?") is None
     assert ask("Will you require visa sponsorship to work in the United Kingdom?") is None
@@ -89,12 +98,16 @@ def test_intents_never_answer_other_countries_current_salary_or_prose(service, c
 
 
 async def test_already_applied_footer_on_a_job_page_is_not_an_application(service, page, tmp_path):
-    await page.set_content("<h1>Engineer</h1><p>Already applied? Sign in to check your application status.</p><a href='#'>Apply now</a>")
+    await page.set_content(
+        "<h1>Engineer</h1><p>Already applied? Sign in to check your application status.</p><a href='#'>Apply now</a>"
+    )
     adapter = Adapter(engine_for(service, page, tmp_path))
     assert adapter.classify(await adapter.form.scan()) == Step.JOB
 
 
-async def test_submit_is_clicked_once_even_when_the_page_does_not_change(service, page, tmp_path, monkeypatch):
+async def test_submit_is_clicked_once_even_when_the_page_does_not_change(
+    service, page, tmp_path, monkeypatch
+):
     await page.set_content(
         "<h1>Review</h1><label>Name<input value='Alex Example' required></label>"
         "<button type=button onclick='window.clicks=(window.clicks||0)+1'>Submit Application</button>"
@@ -117,11 +130,17 @@ async def test_resume_rejected_on_an_earlier_page_blocks_the_dry_run(service, pa
 
 
 async def test_no_email_is_triggered_without_the_shared_sender_lease(service, page, tmp_path, monkeypatch):
-    await page.set_content("<label>Email<input type=email></label><button type=button onclick='window.sent=1'>Continue</button>")
+    await page.set_content(
+        "<label>Email<input type=email></label><button type=button onclick='window.sent=1'>Continue</button>"
+    )
     engine = engine_for(service, page, tmp_path)
     adapter = Adapter(engine)
     monkeypatch.setattr(type(service.inbox), "configured", property(lambda self: True))
-    monkeypatch.setattr(service.inbox, "arm", AsyncMock(side_effect=ValueError("Another application is verifying with this sender")))
+    monkeypatch.setattr(
+        service.inbox,
+        "arm",
+        AsyncMock(side_effect=ValueError("Another application is verifying with this sender")),
+    )
     result = await adapter.on_email_entry(await adapter.form.scan())
     assert result["state"] == "timed_out"
     assert not await page.evaluate("window.sent")
@@ -142,15 +161,23 @@ async def test_untrusted_acknowledgement_does_not_hide_the_trusted_one(service, 
     from jobpilot.receipts import check_receipts
 
     gmail = FakeGmail(EMAIL).connect(service)
-    job, _ = add_job(service.db, JobInput(url="https://jobs.example.test/ramp", company="Ramp", title="AI Engineer"))
+    job, _ = add_job(
+        service.db, JobInput(url="https://jobs.example.test/ramp", company="Ramp", title="AI Engineer")
+    )
     with service.db.exclusive() as s:
-        run = Run(job_id=job["id"], mode="submit", state="submission_unknown", packet={"profile": {"email": EMAIL}})
+        run = Run(
+            job_id=job["id"], mode="submit", state="submission_unknown", packet={"profile": {"email": EMAIL}}
+        )
         s.add(run)
         s.flush()
         run_id = run.id
     body = "Thank you for applying to Ramp for the AI Engineer position. We received your application."
-    gmail.deliver(EMAIL, "no-reply@ramp.com", "Thank you for applying to Ramp", body, received=time.time() + 1)
-    gmail.deliver(EMAIL, "alerts@jobboard-mailer.test", "Thank you for applying to Ramp", body, received=time.time() + 2)
+    gmail.deliver(
+        EMAIL, "no-reply@ramp.com", "Thank you for applying to Ramp", body, received=time.time() + 1
+    )
+    gmail.deliver(
+        EMAIL, "alerts@jobboard-mailer.test", "Thank you for applying to Ramp", body, received=time.time() + 2
+    )
     await check_receipts(service.mail, run_id)
     with service.db.session() as s:
         row = s.get(Run, run_id)
@@ -192,8 +219,15 @@ async def test_adapter_solves_a_challenge_that_opens_after_the_email_step(servic
 async def test_visible_hcaptcha_checkbox_is_opened(page, config):
     from jobpilot.capsolver import CaptchaSolver
 
-    await page.route("https://newassets.hcaptcha.com/**", lambda r: r.fulfill(content_type="text/html", body=(
-        "<div id=checkbox role=checkbox onclick=\"parent.postMessage('passed','*')\">I am human</div>")))
+    await page.route(
+        "https://newassets.hcaptcha.com/**",
+        lambda r: r.fulfill(
+            content_type="text/html",
+            body=(
+                "<div id=checkbox role=checkbox onclick=\"parent.postMessage('passed','*')\">I am human</div>"
+            ),
+        ),
+    )
     await page.set_content(
         '<iframe src="https://newassets.hcaptcha.com/captcha/v1/x/static/hcaptcha.html#frame=checkbox" style="width:303px;height:78px"></iframe>'
         "<textarea name=h-captcha-response></textarea>"
@@ -209,11 +243,21 @@ def workday_engine(service, page, tmp_path, url):
     profile = Profile(email=EMAIL, allow_account_creation=True)
     f = FormSession(page, Resolver(profile, service.db, service.config), tmp_path / "r.pdf", lambda *a: None)
     return SimpleNamespace(
-        job={"url": url}, page=page, form=f, db=service.db, service=service, config=service.config, run_id="r",
-        email_verification=SimpleNamespace(rule={"link_origins": [url.rsplit("/job", 1)[0]]}, challenge_id=None,
-                                           prepare_submission=AsyncMock(), state=lambda o: ("link", []),
-                                           handle=AsyncMock(side_effect=AssertionError("handled the sign-in form")),
-                                           close=lambda: None),
+        job={"url": url},
+        page=page,
+        form=f,
+        db=service.db,
+        service=service,
+        config=service.config,
+        run_id="r",
+        email_verification=SimpleNamespace(
+            rule={"link_origins": [url.rsplit("/job", 1)[0]]},
+            challenge_id=None,
+            prepare_submission=AsyncMock(),
+            state=lambda o: ("link", []),
+            handle=AsyncMock(side_effect=AssertionError("handled the sign-in form")),
+            close=lambda: None,
+        ),
         emit=lambda *a: None,
     )
 
@@ -224,14 +268,18 @@ SIGN_IN = """<h2>Sign In</h2><div data-automation-id=errorMessage role=alert hid
  const a=document.querySelector('[role=alert]');a.hidden=false;a.textContent=window.MESSAGE">Sign In</button>"""
 
 
-async def test_workday_unverified_sign_in_reverifies_instead_of_mixed_error(service, page, tmp_path, monkeypatch):
+async def test_workday_unverified_sign_in_reverifies_instead_of_mixed_error(
+    service, page, tmp_path, monkeypatch
+):
     from jobpilot.accounts import AccountStore
     from jobpilot.workday import WorkdayAuth
 
     url = "https://acme.wd5.myworkdayjobs.com/External/job/X_R1"
     await page.route("**/*", lambda r: r.fulfill(content_type="text/html", body=SIGN_IN))
     await page.goto(url)
-    await page.evaluate("window.MESSAGE='Your account is not verified. Check your email for the verification link.'")
+    await page.evaluate(
+        "window.MESSAGE='Your account is not verified. Check your email for the verification link.'"
+    )
     store = AccountStore(service, EMAIL)
     store.save(url, store.shared(), "verification_pending")  # Left unverified by an earlier run.
     auth = WorkdayAuth(workday_engine(service, page, tmp_path, url))
@@ -271,9 +319,20 @@ async def test_forgotten_or_corrected_answers_stay_gone(service, prepared):
     service.db.set_setting("control", {"auto_submit": True, "paused": False})
     job, _ = add_job(service.db, JobInput(url="https://example.test/job/kb-forget", company="Acme"))
     run = await service.queue(job["id"], "dry_run", prepared["id"])
-    field = {"label": "Do you hold a security clearance?", "section": "", "options": ["Yes", "No"], "employer": "Acme"}
-    service.complete(run["id"], {"state": "needs_review", "reviews": [
-        {"question": field["label"], "options": field["options"], "key": answer_key(field)}]}, 1)
+    field = {
+        "label": "Do you hold a security clearance?",
+        "section": "",
+        "options": ["Yes", "No"],
+        "employer": "Acme",
+    }
+    service.complete(
+        run["id"],
+        {
+            "state": "needs_review",
+            "reviews": [{"question": field["label"], "options": field["options"], "key": answer_key(field)}],
+        },
+        1,
+    )
     with service.db.session() as s:
         review_id = s.query(Review).filter_by(run_id=run["id"]).one().id
     service.answer_review(review_id, "Yes")
@@ -299,7 +358,11 @@ async def test_answered_but_still_missing_question_is_asked_again(service, prepa
     run = await service.queue(job["id"], "dry_run", prepared["id"])
     with service.db.exclusive() as s:
         s.add(Review(run_id=run["id"], question="Notice period?", options=[], key="k1", answer="2 weeks"))
-    service.complete(run["id"], {"state": "needs_review", "reviews": [{"question": "Notice period?", "options": [], "key": "k1"}]}, 1)
+    service.complete(
+        run["id"],
+        {"state": "needs_review", "reviews": [{"question": "Notice period?", "options": [], "key": "k1"}]},
+        1,
+    )
     with service.db.session() as s:
         rows = s.query(Review).filter_by(run_id=run["id"]).all()
         assert sorted(r.answer is None for r in rows) == [False, True]  # Re-asked, not stuck.
@@ -319,10 +382,19 @@ def test_changed_application_password_is_used_for_new_accounts(service):
 def test_address_facts_and_structured_address_stay_in_sync():
     from jobpilot.api import sync_address
 
-    stored = {"facts": {"street_address": "1 Old St", "postal_code": "02139"}, "address": {"line1": "1 Old St", "postal_code": "02139"}}
-    edited_facts = {"facts": {"street_address": "9 New Ave", "postal_code": "02139"}, "address": dict(stored["address"])}
+    stored = {
+        "facts": {"street_address": "1 Old St", "postal_code": "02139"},
+        "address": {"line1": "1 Old St", "postal_code": "02139"},
+    }
+    edited_facts = {
+        "facts": {"street_address": "9 New Ave", "postal_code": "02139"},
+        "address": dict(stored["address"]),
+    }
     sync_address(stored, edited_facts)
     assert edited_facts["address"]["line1"] == "9 New Ave"
-    edited_address = {"facts": dict(stored["facts"]), "address": {"line1": "5 Other Rd", "postal_code": "02139"}}
+    edited_address = {
+        "facts": dict(stored["facts"]),
+        "address": {"line1": "5 Other Rd", "postal_code": "02139"},
+    }
     sync_address(stored, edited_address)
     assert edited_address["facts"]["street_address"] == "5 Other Rd"

@@ -235,9 +235,7 @@ def create_app(config: Settings | None = None):
         ]
         confirmed = [r for r in today if r["state"] == "confirmed"]
         with db.session() as s:
-            interventions = s.scalar(
-                select(func.count()).select_from(Review).where(Review.created_at >= day)
-            )
+            interventions = s.scalar(select(func.count()).select_from(Review).where(Review.created_at >= day))
         return {
             "jobs": jobs,
             "runs": runs,
@@ -256,7 +254,9 @@ def create_app(config: Settings | None = None):
                 if confirmed
                 else 0,
                 # What the handoff asked to measure: model calls, interventions and receipts.
-                "model_calls_per_run": round(sum(r["model_calls"] for r in today) / len(today), 1) if today else 0,
+                "model_calls_per_run": round(sum(r["model_calls"] for r in today) / len(today), 1)
+                if today
+                else 0,
                 "interventions_today": (interventions or 0)
                 + sum(r["state"] in {"waiting_browser", "waiting_answer"} for r in today),
                 "website_receipts_today": sum(bool(r["receipt"].get("website_confirmed")) for r in confirmed),

@@ -100,7 +100,10 @@ EMPLOYER_SPECIFIC = re.compile(
 def employer_variants(employer):
     e = (employer or "").strip()
     base = re.sub(
-        r",?\s+(inc\.?|llc|ltd\.?|corp(?:oration)?\.?|co\.?|plc|gmbh|company|group|holdings)$", "", e, flags=re.I
+        r",?\s+(inc\.?|llc|ltd\.?|corp(?:oration)?\.?|co\.?|plc|gmbh|company|group|holdings)$",
+        "",
+        e,
+        flags=re.I,
     )
     return [v for v in {e, base} if len(v) >= 3]
 
@@ -150,11 +153,58 @@ def relevant_fact(label, key):
 
 # ----- index over reviewed answers -------------------------------------------------------------
 STOP = {
-    "a", "an", "the", "you", "your", "are", "is", "do", "does", "have", "has", "of", "to", "in", "for",
-    "with", "and", "or", "on", "at", "be", "this", "that", "please", "will", "would", "can", "any", "if",
-    "we", "our", "us", "as", "by", "it", "i", "my", "me", "employer", "did", "been",
+    "a",
+    "an",
+    "the",
+    "you",
+    "your",
+    "are",
+    "is",
+    "do",
+    "does",
+    "have",
+    "has",
+    "of",
+    "to",
+    "in",
+    "for",
+    "with",
+    "and",
+    "or",
+    "on",
+    "at",
+    "be",
+    "this",
+    "that",
+    "please",
+    "will",
+    "would",
+    "can",
+    "any",
+    "if",
+    "we",
+    "our",
+    "us",
+    "as",
+    "by",
+    "it",
+    "i",
+    "my",
+    "me",
+    "employer",
+    "did",
+    "been",
 }
-CHOICE_TYPES = {"dropdown", "pills", "radio", "radiogroup", "select", "combobox", "buttonchoice", "checkboxgroup"}
+CHOICE_TYPES = {
+    "dropdown",
+    "pills",
+    "radio",
+    "radiogroup",
+    "select",
+    "combobox",
+    "buttonchoice",
+    "checkboxgroup",
+}
 
 
 def kb_norm(question, employer=""):
@@ -293,7 +343,8 @@ def search(db, text="", limit=10):
     from .schemas import Profile
 
     rows = [
-        a.model_dump() for a in reversed(Profile.model_validate(db.get_setting("profile", {})).reviewed_answers)
+        a.model_dump()
+        for a in reversed(Profile.model_validate(db.get_setting("profile", {})).reviewed_answers)
     ]
     if text:
         want = tokens(kb_norm(text))

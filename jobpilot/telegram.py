@@ -36,7 +36,9 @@ async def ask_next_question(service):
         active = service.db.get_setting("telegram_question", {})
         with service.db.session() as s:
             candidates = s.execute(
-                select(Review, Run, Job).join(Run, Review.run_id == Run.id).join(Job, Run.job_id == Job.id)
+                select(Review, Run, Job)
+                .join(Run, Review.run_id == Run.id)
+                .join(Job, Run.job_id == Job.id)
                 .where(Review.answer.is_(None), Run.state.in_(["waiting_answer", "needs_review", *LIVE]))
                 .order_by(Review.created_at)
             ).all()
@@ -46,15 +48,19 @@ async def ask_next_question(service):
             if old and old.answer is None:
                 old_run = s.get(Run, old.run_id)
                 live_waiting = any(run.state in LIVE for _, run, _ in candidates)
-                if old_run and old_run.state in LIVE | {"waiting_answer", "needs_review"} and (
-                    old_run.state in LIVE or not live_waiting
+                if (
+                    old_run
+                    and old_run.state in LIVE | {"waiting_answer", "needs_review"}
+                    and (old_run.state in LIVE or not live_waiting)
                 ):
                     return
             chosen = None
             for review, run, job in candidates:
                 if review.key in {"manual", "session"}:
                     continue
-                newer = s.scalar(select(Run.id).where(Run.job_id == run.job_id, Run.created_at > run.created_at).limit(1))
+                newer = s.scalar(
+                    select(Run.id).where(Run.job_id == run.job_id, Run.created_at > run.created_at).limit(1)
+                )
                 if not newer:
                     chosen = (review.id, review.question, review.options, job.company, job.title)
                     break
@@ -67,9 +73,12 @@ async def ask_next_question(service):
             "text": f"I need one answer for {title} at {company}:\n\n{question}\n\nReply here in your own words. I’ll remember it and continue the application.",
         }
         if options:
-            payload["reply_markup"] = {"inline_keyboard": [
-                [{"text": option[:50], "callback_data": f"a:{rid}:{i}"}] for i, option in enumerate(options[:8])
-            ]}
+            payload["reply_markup"] = {
+                "inline_keyboard": [
+                    [{"text": option[:50], "callback_data": f"a:{rid}:{i}"}]
+                    for i, option in enumerate(options[:8])
+                ]
+            }
         else:
             payload["reply_markup"] = {"force_reply": True, "selective": True}
         sent = await api(service.config, "sendMessage", payload)
@@ -77,13 +86,19 @@ async def ask_next_question(service):
         service.db.set_setting("telegram_question", {"review_id": rid, "message_id": mid})
         if mid:
             history = service.db.get_setting("telegram_question_messages", {})
-            service.db.set_setting("telegram_question_messages", dict(list({**history, str(mid): rid}.items())[-100:]))
+            service.db.set_setting(
+                "telegram_question_messages", dict(list({**history, str(mid): rid}.items())[-100:])
+            )
 
 
 async def answer_from_text(service, message):
     active = service.db.get_setting("telegram_question", {})
     reply_to = message.get("reply_to_message", {}).get("message_id")
-    rid = service.db.get_setting("telegram_question_messages", {}).get(str(reply_to)) if reply_to else active.get("review_id")
+    rid = (
+        service.db.get_setting("telegram_question_messages", {}).get(str(reply_to))
+        if reply_to
+        else active.get("review_id")
+    )
     if not rid:
         return None
     with service.db.session() as s:
@@ -99,7 +114,9 @@ async def answer_from_text(service, message):
         from .models import structured
 
         parsed = await structured(
-            service.config, service.db, ReplyInterpretation,
+            service.config,
+            service.db,
+            ReplyInterpretation,
             "Interpret the applicant's reply to exactly one application question. Return an answer only "
             "when explicitly supported by this reply. If options exist, choose one exact option; otherwise "
             "return the applicant's exact text. Include an exact supporting quote from the reply. "
@@ -114,7 +131,9 @@ async def answer_from_text(service, message):
         if answer is None:
             if parsed.kind == "unrelated":
                 return await chat(service, text)
-            return parsed.reply or "Please answer the question directly so I can save the correct information."
+            return (
+                parsed.reply or "Please answer the question directly so I can save the correct information."
+            )
     if answer is None:
         return "Please choose one of these answers: " + "; ".join(options)
     result = await service.resolve_review(rid, answer)
@@ -125,15 +144,24 @@ async def answer_from_text(service, message):
 
 async def chat(service, text):
     with service.db.session() as s:
-        rows = s.execute(select(Run, Job).join(Job, Run.job_id == Job.id).where(Job.demo.is_(False))
-                         .order_by(Run.created_at.desc()).limit(20)).all()
-        status = [{"company": j.company, "job": j.title, "state": r.state, "reason": r.reason} for r, j in rows]
+        rows = s.execute(
+            select(Run, Job)
+            .join(Job, Run.job_id == Job.id)
+            .where(Job.demo.is_(False))
+            .order_by(Run.created_at.desc())
+            .limit(20)
+        ).all()
+        status = [
+            {"company": j.company, "job": j.title, "state": r.state, "reason": r.reason} for r, j in rows
+        ]
     if not service.config.mimo_api_key:
         return "Send a job link to apply, ask for status, or reply to an application question. You can also say pause or resume."
     from .models import structured
 
     reply = await structured(
-        service.config, service.db, ChatReply,
+        service.config,
+        service.db,
+        ChatReply,
         "You are the applicant's conversational ApplyPilot assistant. Answer briefly in plain language "
         "using the supplied application status. Explain failures honestly; submitted means confirmed. "
         "You cannot perform actions in this response. Never claim to have applied, changed settings, or "
@@ -182,29 +210,50 @@ async def ask_next_browser(service):
         active = service.db.get_setting("telegram_browser_question", {})
         with service.db.session() as s:
             old = s.get(Run, active.get("run_id", ""))
-            if old and old.state == "waiting_browser" and not s.scalar(
-                select(Run.id).where(Run.job_id == old.job_id, Run.created_at > old.created_at).limit(1)
+            if (
+                old
+                and old.state == "waiting_browser"
+                and not s.scalar(
+                    select(Run.id).where(Run.job_id == old.job_id, Run.created_at > old.created_at).limit(1)
+                )
             ):
                 return
-            rows = s.execute(select(Run, Job).join(Job, Run.job_id == Job.id)
-                             .where(Run.state == "waiting_browser").order_by(Run.created_at)).all()
-            chosen = next(((r.id, j.company, r.reason) for r, j in rows if not s.scalar(
-                select(Run.id).where(Run.job_id == r.job_id, Run.created_at > r.created_at).limit(1)
-            )), None)
+            rows = s.execute(
+                select(Run, Job)
+                .join(Job, Run.job_id == Job.id)
+                .where(Run.state == "waiting_browser")
+                .order_by(Run.created_at)
+            ).all()
+            chosen = next(
+                (
+                    (r.id, j.company, r.reason)
+                    for r, j in rows
+                    if not s.scalar(
+                        select(Run.id).where(Run.job_id == r.job_id, Run.created_at > r.created_at).limit(1)
+                    )
+                ),
+                None,
+            )
         if not chosen:
             service.db.set_setting("telegram_browser_question", {})
             return
         rid, company, reason = chosen
-        sent = await api(service.config, "sendMessage", {
-            "chat_id": service.config.telegram_user_id,
-            "text": f"The {company} page is open in Chrome on your Mac. {reason}\n\nWhen finished, reply done to this message. I’ll continue from that page.",
-            "reply_markup": {"force_reply": True, "selective": True},
-        })
+        sent = await api(
+            service.config,
+            "sendMessage",
+            {
+                "chat_id": service.config.telegram_user_id,
+                "text": f"The {company} page is open in Chrome on your Mac. {reason}\n\nWhen finished, reply done to this message. I’ll continue from that page.",
+                "reply_markup": {"force_reply": True, "selective": True},
+            },
+        )
         mid = (sent or {}).get("message_id")
         service.db.set_setting("telegram_browser_question", {"run_id": rid, "message_id": mid})
         if mid:
             history = service.db.get_setting("telegram_browser_messages", {})
-            service.db.set_setting("telegram_browser_messages", dict(list({**history, str(mid): rid}.items())[-100:]))
+            service.db.set_setting(
+                "telegram_browser_messages", dict(list({**history, str(mid): rid}.items())[-100:])
+            )
 
 
 async def notify_run(service, run_id):
@@ -220,7 +269,9 @@ async def notify_run(service, run_id):
         if run.state == "waiting_browser":
             if mid := (sent or {}).get("message_id"):
                 history = service.db.get_setting("telegram_browser_messages", {})
-                service.db.set_setting("telegram_browser_messages", dict(list({**history, str(mid): run_id}.items())[-100:]))
+                service.db.set_setting(
+                    "telegram_browser_messages", dict(list({**history, str(mid): run_id}.items())[-100:])
+                )
             await ask_next_browser(service)
         await ask_next_question(service)
     except Exception:
@@ -289,9 +340,7 @@ async def handle_update(service, update):
             reply = "Use /learn QUESTION = ANSWER"
         else:
             entry = save(service.db, question.strip(), answer.strip())
-            reply = (
-                f"Learned ({entry['id'][:8]}, {entry['scope']}): {entry['question'][:120]} → {entry['answer'][:120]}"
-            )
+            reply = f"Learned ({entry['id'][:8]}, {entry['scope']}): {entry['question'][:120]} → {entry['answer'][:120]}"
     elif cmd == "/kb":
         from .knowledge import search
 
@@ -318,18 +367,35 @@ async def handle_update(service, update):
         reply = HELP
     elif cmd in {"/status", "/queue", "/report"}:
         with service.db.session() as s:
-            rows = s.execute(select(Run, Job).join(Job, Run.job_id == Job.id).where(Job.demo.is_(False)).order_by(Run.created_at.desc()).limit(10)).all()
+            rows = s.execute(
+                select(Run, Job)
+                .join(Job, Run.job_id == Job.id)
+                .where(Job.demo.is_(False))
+                .order_by(Run.created_at.desc())
+                .limit(10)
+            ).all()
             reply = (
                 "\n".join(f"{j.company} — {j.title}: {r.state.replace('_', ' ')}" for r, j in rows)
                 or "No applications yet."
             )
-    elif conversational in {"done", "finished", "completed", "signed in", "captcha done"} and service.db.get_setting("telegram_browser_question", {}).get("run_id"):
+    elif conversational in {
+        "done",
+        "finished",
+        "completed",
+        "signed in",
+        "captcha done",
+    } and service.db.get_setting("telegram_browser_question", {}).get("run_id"):
         reply_to = message.get("reply_to_message", {}).get("message_id")
-        rid = (service.db.get_setting("telegram_browser_messages", {}).get(str(reply_to))
-               if reply_to else service.db.get_setting("telegram_browser_question")["run_id"])
+        rid = (
+            service.db.get_setting("telegram_browser_messages", {}).get(str(reply_to))
+            if reply_to
+            else service.db.get_setting("telegram_browser_question")["run_id"]
+        )
         with service.db.exclusive() as s:
             run = s.get(Run, rid or "")
-            newer = run and s.scalar(select(Run.id).where(Run.job_id == run.job_id, Run.created_at > run.created_at).limit(1))
+            newer = run and s.scalar(
+                select(Run.id).where(Run.job_id == run.job_id, Run.created_at > run.created_at).limit(1)
+            )
             if run and run.state == "waiting_browser" and not newer:
                 job = s.get(Job, run.job_id)
                 job.status = "ready"

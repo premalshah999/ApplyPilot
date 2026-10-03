@@ -16,9 +16,13 @@ class FakeGmail:
         self.address = address.lower()
         self.messages = []
 
-    def deliver(self, to, sender, subject, text, link=None, link_text="Verify", authenticated=True, received=None):
+    def deliver(
+        self, to, sender, subject, text, link=None, link_text="Verify", authenticated=True, received=None
+    ):
         domain = sender.rpartition("@")[2]
-        body = f"<p>{html.escape(text)}</p>" + (f'<p><a href="{link}">{html.escape(link_text)}</a></p>' if link else "")
+        body = f"<p>{html.escape(text)}</p>" + (
+            f'<p><a href="{link}">{html.escape(link_text)}</a></p>' if link else ""
+        )
         auth = (
             f"mx.google.com; dkim=pass header.i=@{domain}; spf=pass; dmarc=pass (p=REJECT) header.from={domain}"
             if authenticated
@@ -46,9 +50,7 @@ class FakeGmail:
             q = parse_qs(request.url.query.decode()).get("q", [""])[0]
             after = int(m[1]) if (m := re.search(r"after:(\d+)", q)) else 0
             ids = [
-                {"id": m["id"]}
-                for m in reversed(self.messages)
-                if int(m["internalDate"]) / 1000 >= after - 1
+                {"id": m["id"]} for m in reversed(self.messages) if int(m["internalDate"]) / 1000 >= after - 1
             ]
             return httpx.Response(200, json={"messages": ids[:20]})
         if request.url.path.endswith("/profile"):
@@ -69,7 +71,11 @@ class FakeGmail:
                 Mailbox(
                     email=self.address,
                     credentials=service.mail.vault.seal(
-                        {"access_token": "fixture", "refresh_token": "fixture", "expires_at": time.time() + 86400}
+                        {
+                            "access_token": "fixture",
+                            "refresh_token": "fixture",
+                            "expires_at": time.time() + 86400,
+                        }
                     ),
                 )
             )

@@ -25,7 +25,9 @@ UNVERIFIED = re.compile(
     r"(?:verification|activation) (?:email|link)|check your email",
     re.I,
 )
-EXISTS = re.compile(r"already (?:exists|in use|registered)|account (?:with this email )?already|sign in instead", re.I)
+EXISTS = re.compile(
+    r"already (?:exists|in use|registered)|account (?:with this email )?already|sign in instead", re.I
+)
 LOCKED = re.compile(r"account (?:is |has been )?locked|too many (?:failed )?(?:attempts|tries)", re.I)
 ACKNOWLEDGED = re.compile(
     r"(?:email|link) (?:has been |was )?sent|check your email|sent you an email|we.ve sent|"
@@ -96,7 +98,9 @@ class WorkdayAuth:
 
     async def click(self, el):
         handle = await el.element_handle()
-        await handle.evaluate("e=>{e.dataset.jpAuthControl='true';const f=e.closest('form');if(f)f.dataset.jpAuthControl='true'}")
+        await handle.evaluate(
+            "e=>{e.dataset.jpAuthControl='true';const f=e.closest('form');if(f)f.dataset.jpAuthControl='true'}"
+        )
         clicked_overlay = None
         try:
             # Workday renders an accessible click_filter over some submit buttons.
@@ -125,7 +129,9 @@ class WorkdayAuth:
                     await target.evaluate("e=>e.click()")
         finally:
             try:
-                await handle.evaluate("e=>{delete e.dataset.jpAuthControl;const f=e.closest('form');if(f)delete f.dataset.jpAuthControl}")
+                await handle.evaluate(
+                    "e=>{delete e.dataset.jpAuthControl;const f=e.closest('form');if(f)delete f.dataset.jpAuthControl}"
+                )
                 if clicked_overlay:
                     await clicked_overlay.evaluate("e=>delete e.dataset.jpAuthControl")
             except Exception:
@@ -227,7 +233,9 @@ class WorkdayAuth:
         self.activated = True
         cid = getattr(e.email_verification, "challenge_id", None)
         if not cid:
-            c = mail.begin(e.run_id, rule, e.form.resolver.profile.email, "link", self.created_at or time.time() - 300)
+            c = mail.begin(
+                e.run_id, rule, e.form.resolver.profile.email, "link", self.created_at or time.time() - 300
+            )
             cid = c["id"]
         e.emit("account", "Waiting for the Workday account activation email")
         guard = None
@@ -261,13 +269,18 @@ class WorkdayAuth:
     async def reverify(self):
         """An account an earlier run left unverified: request a fresh email, then follow it."""
         page = self.engine.page
-        resend = page.get_by_role("button", name=re.compile(r"resend|send (?:the )?(?:verification|email) again|verify (?:my )?email", re.I))
+        resend = page.get_by_role(
+            "button",
+            name=re.compile(r"resend|send (?:the )?(?:verification|email) again|verify (?:my )?email", re.I),
+        )
         visible = [b for b in await resend.all() if await b.is_visible()]
         if len(visible) == 1:
             e = self.engine
             rule = getattr(e.email_verification, "rule", None)
             if not rule:
-                raise ValueError("Workday needs the account activation email; connect Gmail for this employer")
+                raise ValueError(
+                    "Workday needs the account activation email; connect Gmail for this employer"
+                )
             self.created_at = time.time() - 5
             if getattr(e.email_verification, "challenge_id", None):
                 e.email_verification.close()
@@ -307,7 +320,9 @@ class WorkdayAuth:
             raise ValueError("Workday account recovery requires a connected mailbox for this employer")
         saved = e.db.get_setting(self.account_key(), {})
         if time.time() - saved.get("reset_requested_at", 0) < 300:
-            raise ValueError("A Workday password reset was recently requested; wait five minutes before retrying")
+            raise ValueError(
+                "A Workday password reset was recently requested; wait five minutes before retrying"
+            )
         self.recovery_attempted = True
         forgot = page.get_by_text("Forgot your password?", exact=True)
         if await forgot.count() != 1:
@@ -317,7 +332,9 @@ class WorkdayAuth:
         await reset_button.wait_for(state="visible", timeout=10000)
         # Explicit reset-email step inside the Reset Password dialog (modal precedence: the
         # sign-in form behind it has its own email field).
-        dialog = page.locator('[role="dialog"]:visible,[data-automation-id="popUpDialog"]:visible').filter(has=reset_button)
+        dialog = page.locator('[role="dialog"]:visible,[data-automation-id="popUpDialog"]:visible').filter(
+            has=reset_button
+        )
         scope = dialog.last if await dialog.count() else page
         email = scope.locator('input[data-automation-id="email"]')
         if await email.count() != 1:
@@ -326,21 +343,23 @@ class WorkdayAuth:
         await email.fill(e.form.resolver.profile.email)
         # Account creation and password reset must not reuse the same mail
         # challenge: a reset message has different matching rules.
-        if getattr(e.email_verification, 'challenge_id', None):
+        if getattr(e.email_verification, "challenge_id", None):
             e.email_verification.close()
             e.email_verification.challenge_id = None
         challenge = mail.begin(e.run_id, rule, e.form.resolver.profile.email, "password_reset")
         credentials = self.shared_credentials()
         previous_state = saved.get("state")
         # Keep the working password until the website confirms its replacement.
-        self.save_credentials(self.credentials() or credentials, "reset_requested", reset_requested_at=time.time())
+        self.save_credentials(
+            self.credentials() or credentials, "reset_requested", reset_requested_at=time.time()
+        )
         guard = None
         e.emit("account", "Recovering the employer account through the connected mailbox")
         try:
             await self.click(reset_button)
-            if hasattr(e, 'browser_challenge') and (challenge_result := await e.browser_challenge()):
+            if hasattr(e, "browser_challenge") and (challenge_result := await e.browser_challenge()):
                 e.result = challenge_result
-                raise ValueError('Account recovery security challenge was not accepted')
+                raise ValueError("Account recovery security challenge was not accepted")
             await asyncio.sleep(0.5)
             acknowledged = bool(ACKNOWLEDGED.search(await page.locator("body").inner_text())) or any(
                 200 <= status < 300 for status, _ in self.responses[-2:]
@@ -352,7 +371,9 @@ class WorkdayAuth:
                 # Nothing was delivered: the reset is not spent. The cooldown applies only when the
                 # website acknowledged sending one (a later email would then supersede this one).
                 extra = {} if acknowledged else {"reset_requested_at": 0}
-                self.save_credentials(self.credentials() or credentials, previous_state or "created_locally", **extra)
+                self.save_credentials(
+                    self.credentials() or credentials, previous_state or "created_locally", **extra
+                )
                 raise ValueError("The Workday password reset email did not arrive") from None
             e.emit("account", "Employer password reset email received")
             self.save_credentials(self.credentials() or credentials, "reset_email_received")
@@ -370,7 +391,9 @@ class WorkdayAuth:
                 self.secrets.append(await field.element_handle())
                 await field.fill(credentials["password"])
                 await field.blur()
-            button = page.get_by_role("button", name=re.compile(r"^(Reset Password|Submit|Change Password)$", re.I))
+            button = page.get_by_role(
+                "button", name=re.compile(r"^(Reset Password|Submit|Change Password)$", re.I)
+            )
             # A click_filter overlay repeats the button's label; the button itself is the target.
             visible = [
                 b
@@ -387,7 +410,8 @@ class WorkdayAuth:
                     r"password (?:has been|was) (?:successfully )?(?:changed|reset)|"
                     r"password (?:reset|change) (?:was )?successful|"
                     r"password (?:successfully (?:changed|reset)|(?:changed|reset) successfully)",
-                    body, re.I,
+                    body,
+                    re.I,
                 ):
                     self.save_credentials(credentials, "password_reset")
                     mail.outcome(challenge["id"], "verified", "Employer accepted password reset")
@@ -399,14 +423,16 @@ class WorkdayAuth:
             mail.outcome(challenge["id"], "failed", "Employer account recovery did not complete")
             if isinstance(exc, ValueError) and "did not arrive" in str(exc):
                 raise
-            raise ValueError("Workday account recovery did not complete; see account and email status") from None
+            raise ValueError(
+                "Workday account recovery did not complete; see account and email status"
+            ) from None
         finally:
             await self.clear()
             if guard:
                 await guard.close()
             e.verification_origins = None
             # Never expose the one-time reset URL to the agent or screenshot ledger.
-            if not getattr(e, 'result', None):
+            if not getattr(e, "result", None):
                 await page.goto(e.job["url"], wait_until="domcontentloaded", timeout=25000)
 
     async def run(self):
@@ -421,8 +447,14 @@ class WorkdayAuth:
             if hasattr(e, "browser_challenge") and (challenge := await e.browser_challenge()):
                 e.result = challenge
                 return False
-            if re.search(r"Workday is currently unavailable|experiencing a service interruption", await page.locator('body').inner_text(), re.I):
-                raise ValueError("Workday is temporarily unavailable due to a service interruption. No application was submitted.")
+            if re.search(
+                r"Workday is currently unavailable|experiencing a service interruption",
+                await page.locator("body").inner_text(),
+                re.I,
+            ):
+                raise ValueError(
+                    "Workday is temporarily unavailable due to a service interruption. No application was submitted."
+                )
             if origin(page.url) != origin(e.job["url"]):
                 raise ValueError("Workday changed login origin")
             cookie = page.get_by_role("button", name="Accept Cookies", exact=True)
@@ -438,7 +470,10 @@ class WorkdayAuth:
             if await password.count() and await password.is_visible():
                 stored = self.credentials()
                 error = await self.auth_error()
-                if getattr(e, "imported_session", False) and self.account_state not in {"authenticated", "password_reset"}:
+                if getattr(e, "imported_session", False) and self.account_state not in {
+                    "authenticated",
+                    "password_reset",
+                }:
                     await self.recover()
                     continue
                 if self.last_action:
@@ -446,7 +481,9 @@ class WorkdayAuth:
                     action, self.last_action = self.last_action, None
                     if LOCKED.search(error):
                         self.save_credentials(stored or self.shared_credentials(), "locked")
-                        raise ValueError("Workday locked this account after failed sign-ins; sign in manually once")
+                        raise ValueError(
+                            "Workday locked this account after failed sign-ins; sign in manually once"
+                        )
                     if action == "create" and EXISTS.search(error):
                         self.save_credentials(stored or self.shared_credentials(), "exists")
                         link = page.locator('[data-automation-id="signInLink"]')
@@ -481,9 +518,15 @@ class WorkdayAuth:
                                 "no password reset was requested"
                             )
                 create = page.locator('[data-automation-id="createAccountLink"]')
-                if self.account_state in {"authenticated", "password_reset", "activated", "verification_pending", "exists"} and await page.locator('[data-automation-id="verifyPassword"]').count():
+                if (
+                    self.account_state
+                    in {"authenticated", "password_reset", "activated", "verification_pending", "exists"}
+                    and await page.locator('[data-automation-id="verifyPassword"]').count()
+                ):
                     await self.click(page.locator('[data-automation-id="signInLink"]'))
-                    await page.locator('[data-automation-id="verifyPassword"]').wait_for(state="detached", timeout=8000)
+                    await page.locator('[data-automation-id="verifyPassword"]').wait_for(
+                        state="detached", timeout=8000
+                    )
                 if (not stored or self.account_state == "created_locally") and await create.count():
                     await self.click(create)
                     await page.locator('[data-automation-id="verifyPassword"]').wait_for(timeout=8000)
@@ -520,7 +563,7 @@ class WorkdayAuth:
                     else "Signing in with the saved employer account",
                 )
                 await self.click(button)
-                if hasattr(e, 'browser_challenge') and (challenge := await e.browser_challenge()):
+                if hasattr(e, "browser_challenge") and (challenge := await e.browser_challenge()):
                     e.result = challenge
                     return False
                 outcome = await self.settle_after_auth(password, previous=previous_error)
@@ -548,8 +591,8 @@ class WorkdayAuth:
             # fields may then be absent, even though the application form is ready.
             if await self.form_ready():
                 if value := self.credentials():
-                    self.save_credentials(value, 'authenticated')
-                e.emit('account', 'Employer application form opened')
+                    self.save_credentials(value, "authenticated")
+                e.emit("account", "Employer application form opened")
                 return True
             await asyncio.sleep(0.5)
         raise ValueError("Workday did not reach an application form within the account setup window")

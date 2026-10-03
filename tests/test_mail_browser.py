@@ -25,8 +25,7 @@ APPLICATION = """<h1>Application</h1><form action="/applications" method="post">
 
 async def test_greenhouse_received_wording_is_submission_proof(service, page, tmp_path):
     await page.set_content(
-        "<h1>Thank you for your interest in May Mobility!</h1>"
-        "<p>Your application has been received.</p>"
+        "<h1>Thank you for your interest in May Mobility!</h1><p>Your application has been received.</p>"
     )
     form = FormSession(
         page, Resolver(Profile(), service.db, service.config), tmp_path / "resume.pdf", lambda *a: None

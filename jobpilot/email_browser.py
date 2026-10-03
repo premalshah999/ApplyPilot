@@ -174,16 +174,18 @@ class EmailBrowser:
         if not self.rule:
             from datetime import datetime
 
-            started = e.run_record.get('started_at')
+            started = e.run_record.get("started_at")
             since = datetime.fromisoformat(started).timestamp() if started else time.time()
-            e.emit('email_wait', 'Identifying this employer’s verification email automatically')
+            e.emit("email_wait", "Identifying this employer’s verification email automatically")
             for _ in range(6):
                 self.rule = await self.mail.discover_rule(e.job, e.form.resolver.profile.email, since)
                 if self.rule:
                     break
                 await asyncio.sleep(3)
             if not self.rule:
-                raise ValueError("No authenticated verification email could be linked uniquely to this employer")
+                raise ValueError(
+                    "No authenticated verification email could be linked uniquely to this employer"
+                )
         if self.attempts:
             raise ValueError("Email verification did not complete; automatic resends are disabled")
         if origin(e.page.url) not in self.rule["link_origins"]:

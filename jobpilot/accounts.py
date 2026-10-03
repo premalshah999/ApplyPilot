@@ -235,8 +235,13 @@ def summary(service):
 
     with service.db.session() as s:
         rows = [
-            {"id": r.key, "origin": r.value.get("origin", ""), "state": r.value.get("state", ""),
-             "updated_at": r.value.get("updated_at", ""), "reset_requested_at": r.value.get("reset_requested_at")}
+            {
+                "id": r.key,
+                "origin": r.value.get("origin", ""),
+                "state": r.value.get("state", ""),
+                "updated_at": r.value.get("updated_at", ""),
+                "reset_requested_at": r.value.get("reset_requested_at"),
+            }
             for r in s.scalars(select(Setting).where(Setting.key.like("employer_account:%")))
         ]
     return {"accounts": sorted(rows, key=lambda r: r["origin"])}

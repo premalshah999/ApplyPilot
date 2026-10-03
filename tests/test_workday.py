@@ -48,24 +48,41 @@ async def test_workday_account_is_encrypted_and_password_never_enters_answers(se
     assert await page.locator('input[type="file"]').count() == 1
 
 
-async def test_expired_account_recovers_via_email_without_exposing_password(service, page, tmp_path, monkeypatch):
+async def test_expired_account_recovers_via_email_without_exposing_password(
+    service, page, tmp_path, monkeypatch
+):
     url = "http://127.0.0.1:31999/job"
     login = """<button onclick="document.body.innerHTML='<input data-automation-id=email><button data-automation-id=resetPasswordButton>Reset Password</button>'">Forgot your password?</button>"""
     reset = """<form onsubmit="event.preventDefault();if(a.value===b.value && a.value.length>12)document.body.innerHTML='Your password has been changed';">
     <input id=a type=password><input id=b type=password><button>Reset Password</button></form>"""
     await page.context.add_init_script(GUARD)
-    await page.route("**/*", lambda r: r.fulfill(content_type="text/html", body=reset if "/reset?" in r.request.url else login))
+    await page.route(
+        "**/*",
+        lambda r: r.fulfill(content_type="text/html", body=reset if "/reset?" in r.request.url else login),
+    )
     await page.goto(url)
     events, outcomes = [], []
     monkeypatch.setattr(service.mail, "begin", lambda *a: {"id": "reset-challenge"})
-    monkeypatch.setattr(service.mail, "wait", AsyncMock(return_value={"kind": "link", "value": url.replace('/job', '/reset?token=one-use-secret')}))
+    monkeypatch.setattr(
+        service.mail,
+        "wait",
+        AsyncMock(return_value={"kind": "link", "value": url.replace("/job", "/reset?token=one-use-secret")}),
+    )
     monkeypatch.setattr(service.mail, "outcome", lambda *a: outcomes.append(a))
     profile = Profile(email="alex@example.test", allow_account_creation=True)
-    e = SimpleNamespace(job={"url": url}, page=page, run_id="fixture", db=service.db,
-                        config=service.config, service=service,
-                        form=FormSession(page, Resolver(profile, service.db, service.config), tmp_path/'resume.pdf', lambda *a: None),
-                        email_verification=SimpleNamespace(rule={"link_origins": ["http://127.0.0.1:31999"]}),
-                        emit=lambda *a: events.append(a))
+    e = SimpleNamespace(
+        job={"url": url},
+        page=page,
+        run_id="fixture",
+        db=service.db,
+        config=service.config,
+        service=service,
+        form=FormSession(
+            page, Resolver(profile, service.db, service.config), tmp_path / "resume.pdf", lambda *a: None
+        ),
+        email_verification=SimpleNamespace(rule={"link_origins": ["http://127.0.0.1:31999"]}),
+        emit=lambda *a: events.append(a),
+    )
     auth = WorkdayAuth(e)
     await auth.recover()
     credentials = auth.credentials()

@@ -119,33 +119,45 @@ async def test_stale_solver_response_not_injected(config, page, monkeypatch):
     assert await page.locator("textarea").input_value() == ""
 
 
-async def test_image_fallback_clicks_only_challenge_and_verifies_transition(config,page,monkeypatch):
-    config.twocaptcha_api_key='private-coordinate-key'
-    html='''<style>body{margin:0}#puzzle{height:470px;background:#eee}</style><div id=puzzle onclick="window.picked=true">Select the circle</div>
-    <div class=button-submit role=button style="height:50px" onclick="if(window.picked)parent.postMessage('accepted','*')">Verify</div>'''
-    await page.route('https://hcaptcha.example.test/**',lambda r:r.fulfill(content_type='text/html',body=html))
-    await page.set_content('''<p>PRIVATE APPLICATION CONTENT</p><iframe title="hCaptcha challenge" src="https://hcaptcha.example.test/challenge" style="width:520px;height:570px;border:0"></iframe>
-    <script>addEventListener('message',e=>{if(e.data==='accepted')document.querySelector('iframe').remove()})</script>''')
+async def test_image_fallback_clicks_only_challenge_and_verifies_transition(config, page, monkeypatch):
+    config.twocaptcha_api_key = "private-coordinate-key"
+    html = """<style>body{margin:0}#puzzle{height:470px;background:#eee}</style><div id=puzzle onclick="window.picked=true">Select the circle</div>
+    <div class=button-submit role=button style="height:50px" onclick="if(window.picked)parent.postMessage('accepted','*')">Verify</div>"""
+    await page.route(
+        "https://hcaptcha.example.test/**", lambda r: r.fulfill(content_type="text/html", body=html)
+    )
+    await page.set_content("""<p>PRIVATE APPLICATION CONTENT</p><iframe title="hCaptcha challenge" src="https://hcaptcha.example.test/challenge" style="width:520px;height:570px;border:0"></iframe>
+    <script>addEventListener('message',e=>{if(e.data==='accepted')document.querySelector('iframe').remove()})</script>""")
     await page.frames[-1].wait_for_load_state()
-    async def provider(base,key,task,*args):
-        assert base=='https://api.2captcha.com' and task['type']=='CoordinatesTask'
-        assert 'PRIVATE APPLICATION CONTENT' not in str(task)
-        assert len(task['body'])>100
-        return {'coordinates':[{'x':100,'y':100}]},None
-    monkeypatch.setattr('jobpilot.capsolver.task_result',provider)
-    solver=CaptchaSolver(config,lambda *a:None)
+
+    async def provider(base, key, task, *args):
+        assert base == "https://api.2captcha.com" and task["type"] == "CoordinatesTask"
+        assert "PRIVATE APPLICATION CONTENT" not in str(task)
+        assert len(task["body"]) > 100
+        return {"coordinates": [{"x": 100, "y": 100}]}, None
+
+    monkeypatch.setattr("jobpilot.capsolver.task_result", provider)
+    solver = CaptchaSolver(config, lambda *a: None)
     assert await solver.solve(page)
-    assert await page.locator('p').inner_text()=='PRIVATE APPLICATION CONTENT'
+    assert await page.locator("p").inner_text() == "PRIVATE APPLICATION CONTENT"
 
 
-async def test_image_fallback_rejects_navigation_coordinates(config,page,monkeypatch):
-    config.twocaptcha_api_key='fixture-key'
-    html='<p>Select the circle</p><button onclick="window.badClick=true" style="position:absolute;top:500px">Submit</button>'
-    await page.route('https://hcaptcha.example.test/**',lambda r:r.fulfill(content_type='text/html',body=html))
-    await page.set_content('<iframe title="hCaptcha challenge" src="https://hcaptcha.example.test/challenge" style="width:520px;height:570px"></iframe>')
-    frame=page.frames[-1];await frame.wait_for_load_state()
-    monkeypatch.setattr('jobpilot.capsolver.task_result',AsyncMock(return_value=({'coordinates':[{'x':10,'y':520}]},None)))
-    solver=CaptchaSolver(config,lambda *a:None)
+async def test_image_fallback_rejects_navigation_coordinates(config, page, monkeypatch):
+    config.twocaptcha_api_key = "fixture-key"
+    html = '<p>Select the circle</p><button onclick="window.badClick=true" style="position:absolute;top:500px">Submit</button>'
+    await page.route(
+        "https://hcaptcha.example.test/**", lambda r: r.fulfill(content_type="text/html", body=html)
+    )
+    await page.set_content(
+        '<iframe title="hCaptcha challenge" src="https://hcaptcha.example.test/challenge" style="width:520px;height:570px"></iframe>'
+    )
+    frame = page.frames[-1]
+    await frame.wait_for_load_state()
+    monkeypatch.setattr(
+        "jobpilot.capsolver.task_result",
+        AsyncMock(return_value=({"coordinates": [{"x": 10, "y": 520}]}, None)),
+    )
+    solver = CaptchaSolver(config, lambda *a: None)
     assert not await solver.solve(page)
-    assert 'outside the puzzle' in solver.last_reason
-    assert not await frame.evaluate('window.badClick')
+    assert "outside the puzzle" in solver.last_reason
+    assert not await frame.evaluate("window.badClick")

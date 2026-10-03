@@ -114,8 +114,14 @@ NOT_APPLICATION = re.compile(
 
 # Account states meaning "an account exists here": sign in rather than create.
 KNOWN_ACCOUNT = {
-    "created_locally", "signing_in", "authenticated", "verification_pending", "reset_requested",
-    "password_reset", "exists", "locked",
+    "created_locally",
+    "signing_in",
+    "authenticated",
+    "verification_pending",
+    "reset_requested",
+    "password_reset",
+    "exists",
+    "locked",
 }
 
 
@@ -192,7 +198,8 @@ class Adapter:
             # With the desktop Chrome, a browser-fixable blocker keeps its tab open for you.
             return {
                 "state": "waiting_browser",
-                "reason": reason[:900] + ". Finish this step in the open Chrome tab, then reply done in Telegram.",
+                "reason": reason[:900]
+                + ". Finish this step in the open Chrome tab, then reply done in Telegram.",
                 "reviews": reviews,
             }
         return {"state": state, "reason": reason[:1000], "reviews": reviews}
@@ -331,7 +338,9 @@ class Adapter:
         top = dialogs[-1]
         fields = [f for f in obs["fields"] if f["id"] in top["field_ids"]]
         controls = [c for c in obs["controls"] if c["id"] in top["control_ids"]]
-        if not fields and not [c for c in controls if not re.fullmatch(r"close|x|×|cancel", c["label"], re.I)]:
+        if not fields and not [
+            c for c in controls if not re.fullmatch(r"close|x|×|cancel", c["label"], re.I)
+        ]:
             return None
         return {
             **obs,
@@ -364,7 +373,11 @@ class Adapter:
         if (
             not passwords
             and FORGOT.search(text + " " + " ".join(obs.get("headings", [])))
-            and [f for f in meaningful if f["type"] == "email" or re.search(r"e-?mail|user ?name", f["label"], re.I)]
+            and [
+                f
+                for f in meaningful
+                if f["type"] == "email" or re.search(r"e-?mail|user ?name", f["label"], re.I)
+            ]
             and self.auth_button(obs, "reset")
         ):
             return Step.RESET_PASSWORD
@@ -589,7 +602,9 @@ class Adapter:
                 await self.click(confirm[-1], auth=True)
         await self.form.settle(timeout=6)
         after = await self.form.scan()
-        if self.code_fields(after) and self.signature(Step.EMAIL_CODE, after) == self.signature(Step.EMAIL_CODE, obs):
+        if self.code_fields(after) and self.signature(Step.EMAIL_CODE, after) == self.signature(
+            Step.EMAIL_CODE, obs
+        ):
             self.finish_mail("failed", "Website did not accept the code")
             return None  # The loop sees the same step again and retries or defers.
         self.finish_mail("verified", "Website accepted the verification code")
@@ -685,8 +700,11 @@ class Adapter:
         return {
             "state": "already_applied",
             "reason": "The employer says you already applied to this job",
-            "receipt": {"type": "employer_already_applied", "url": self.page.url,
-                        "evidence": (ALREADY.search(obs["text"]) or [""])[0][:200]},
+            "receipt": {
+                "type": "employer_already_applied",
+                "url": self.page.url,
+                "evidence": (ALREADY.search(obs["text"]) or [""])[0][:200],
+            },
         }
 
     async def on_closed(self, obs):
@@ -962,8 +980,14 @@ class Adapter:
         if mode == "create" and not self.accounts.may_create and not known:
             return self.defer(
                 "This employer requires an account. Enable “Create and reuse employer accounts” in your profile.",
-                [{"question": "Allow account creation for employers that require one", "options": [],
-                  "key": "session", "reason": "Account required"}],
+                [
+                    {
+                        "question": "Allow account creation for employers that require one",
+                        "options": [],
+                        "key": "session",
+                        "reason": "Account required",
+                    }
+                ],
             )
         self.attempts[mode] += 1
         if self.attempts[mode] > 2 or self.attempts["sign_in"] + self.attempts["create"] > 4:
@@ -1129,8 +1153,14 @@ class Adapter:
         the website confirms the new password."""
         url = self.auth_url(obs)
         record = self.accounts.record(url)
-        manual = [{"question": "Sign in to this employer and import the browser session", "options": [],
-                   "key": "session", "reason": detail[:200]}]
+        manual = [
+            {
+                "question": "Sign in to this employer and import the browser session",
+                "options": [],
+                "key": "session",
+                "reason": detail[:200],
+            }
+        ]
         if not self.config.account_password_reset or self.attempts["reset"]:
             return self.defer(f"Could not sign in to this employer ({detail})", manual)
         if not self.inbox.configured or not await self.inbox.rule(self.job, self.accounts.email):
@@ -1143,7 +1173,9 @@ class Adapter:
         if time.time() - record.get("reset_requested_at", 0) < 300:
             return self.defer("A password reset was requested recently; retry in five minutes", manual)
         if record.get("resets", 0) >= 3:
-            return self.defer("Password resets for this employer are exhausted; sign in manually once", manual)
+            return self.defer(
+                "Password resets for this employer are exhausted; sign in manually once", manual
+            )
         self.attempts["reset"] += 1
         obs = await self.form.scan()
         forgot = [b for b in obs["controls"] if FORGOT.search(b["label"])]
@@ -1186,7 +1218,10 @@ class Adapter:
             reason = self.inbox.reason(self.challenge)
             self.finish_mail("failed", "No reset email")
             # Nothing was delivered: allow another request after the cooldown, keep the count.
-            return self.defer("The password reset email did not arrive or was not unique" + (f" ({reason})" if reason else ""))
+            return self.defer(
+                "The password reset email did not arrive or was not unique"
+                + (f" ({reason})" if reason else "")
+            )
         self.emit("auth", "Employer password reset email received")
         if token["kind"] != "link":
             self.finish_mail("failed", "Reset email had no link")

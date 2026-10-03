@@ -246,24 +246,71 @@ INTENTS = [
 
 
 US_STATES = {
-    "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas", "CA": "California",
-    "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware", "DC": "District of Columbia",
-    "FL": "Florida", "GA": "Georgia", "HI": "Hawaii", "ID": "Idaho", "IL": "Illinois", "IN": "Indiana",
-    "IA": "Iowa", "KS": "Kansas", "KY": "Kentucky", "LA": "Louisiana", "ME": "Maine", "MD": "Maryland",
-    "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota", "MS": "Mississippi", "MO": "Missouri",
-    "MT": "Montana", "NE": "Nebraska", "NV": "Nevada", "NH": "New Hampshire", "NJ": "New Jersey",
-    "NM": "New Mexico", "NY": "New York", "NC": "North Carolina", "ND": "North Dakota", "OH": "Ohio",
-    "OK": "Oklahoma", "OR": "Oregon", "PA": "Pennsylvania", "RI": "Rhode Island", "SC": "South Carolina",
-    "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas", "UT": "Utah", "VT": "Vermont",
-    "VA": "Virginia", "WA": "Washington", "WV": "West Virginia", "WI": "Wisconsin", "WY": "Wyoming",
+    "AL": "Alabama",
+    "AK": "Alaska",
+    "AZ": "Arizona",
+    "AR": "Arkansas",
+    "CA": "California",
+    "CO": "Colorado",
+    "CT": "Connecticut",
+    "DE": "Delaware",
+    "DC": "District of Columbia",
+    "FL": "Florida",
+    "GA": "Georgia",
+    "HI": "Hawaii",
+    "ID": "Idaho",
+    "IL": "Illinois",
+    "IN": "Indiana",
+    "IA": "Iowa",
+    "KS": "Kansas",
+    "KY": "Kentucky",
+    "LA": "Louisiana",
+    "ME": "Maine",
+    "MD": "Maryland",
+    "MA": "Massachusetts",
+    "MI": "Michigan",
+    "MN": "Minnesota",
+    "MS": "Mississippi",
+    "MO": "Missouri",
+    "MT": "Montana",
+    "NE": "Nebraska",
+    "NV": "Nevada",
+    "NH": "New Hampshire",
+    "NJ": "New Jersey",
+    "NM": "New Mexico",
+    "NY": "New York",
+    "NC": "North Carolina",
+    "ND": "North Dakota",
+    "OH": "Ohio",
+    "OK": "Oklahoma",
+    "OR": "Oregon",
+    "PA": "Pennsylvania",
+    "RI": "Rhode Island",
+    "SC": "South Carolina",
+    "SD": "South Dakota",
+    "TN": "Tennessee",
+    "TX": "Texas",
+    "UT": "Utah",
+    "VT": "Vermont",
+    "VA": "Virginia",
+    "WA": "Washington",
+    "WV": "West Virginia",
+    "WI": "Wisconsin",
+    "WY": "Wyoming",
 }
 
 
 # Facts saved for the US (authorization, sponsorship, citizenship, visa) do not answer the same
 # question about another country.
 COUNTRY_SCOPED = {
-    "requires_sponsorship", "requires_future_sponsorship_us", "needs_sponsorship", "work_authorized_us",
-    "work_authorized", "work_authorization_us", "us_citizen", "visa_status",
+    "requires_sponsorship",
+    "requires_future_sponsorship_us",
+    "needs_sponsorship",
+    "work_authorized_us",
+    "work_authorized",
+    "work_authorization_us",
+    "us_citizen",
+    "visa_status",
 }
 OTHER_COUNTRY = re.compile(
     r"\b(?:canada|canadian|united kingdom|u\.?k\.?|britain|british|england|scotland|ireland|irish|germany|"
@@ -380,7 +427,10 @@ class Resolver:
         if topic(f["label"]) == "source" and p.application_source and f.get("options_partial"):
             # Search-driven pickers (Workday prompts) find the leaf ("Job Boards › LinkedIn") by name.
             return Answer(
-                field_id=f["id"], value=p.application_source, evidence_ids=["policy:source"], disposition="answer"
+                field_id=f["id"],
+                value=p.application_source,
+                evidence_ids=["policy:source"],
+                disposition="answer",
             )
         if topic(f["label"]) == "source" and p.application_source:
             value = option_value(p.application_source, options)
@@ -388,9 +438,7 @@ class Resolver:
                 value = next((o for o in options if p.application_source.casefold() in o.casefold()), None)
             if value is None:
                 if p.application_source.casefold() == "linkedin":
-                    value = next(
-                        (o for o in options if normalize(o) in {"job board", "job boards"}), None
-                    )
+                    value = next((o for o in options if normalize(o) in {"job board", "job boards"}), None)
             if value is None:
                 value = next(
                     (

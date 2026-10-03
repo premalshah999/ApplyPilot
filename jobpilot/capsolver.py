@@ -141,7 +141,11 @@ async def challenge_frame(page):
 async def checkbox_frame(page):
     """A visible hCaptcha "I am human" checkbox whose response is still empty."""
     for frame in page.frames:
-        if frame == page.main_frame or "hcaptcha" not in (frame.url or "") or "frame=checkbox" not in frame.url:
+        if (
+            frame == page.main_frame
+            or "hcaptcha" not in (frame.url or "")
+            or "frame=checkbox" not in frame.url
+        ):
             continue
         try:
             owner = await frame.frame_element()
@@ -314,7 +318,9 @@ class CaptchaSolver:
                 puzzle["region"] = current[1]  # Measured now: the page may have scrolled.
                 answered.add(puzzle["hash"])
                 await self.act(page, puzzle, points)
-                button = frame.locator(".button-submit").filter(has_text=re.compile(r"^(Verify|Next|Submit)$", re.I))
+                button = frame.locator(".button-submit").filter(
+                    has_text=re.compile(r"^(Verify|Next|Submit)$", re.I)
+                )
                 if await button.count() == 1 and await button.is_visible():
                     await button.click(timeout=3000)
                 await page.wait_for_timeout(1500)
@@ -365,7 +371,9 @@ class CaptchaSolver:
         example = None
         if layout["example"]:
             try:
-                shot = await frame.locator("[data-jp-example]").screenshot(type="jpeg", quality=80, scale="css", timeout=2000)
+                shot = await frame.locator("[data-jp-example]").screenshot(
+                    type="jpeg", quality=80, scale="css", timeout=2000
+                )
                 if len(shot) <= 100_000:
                     example = shot
             except PlaywrightError:
@@ -404,7 +412,12 @@ class CaptchaSolver:
                 left, top = await owner.evaluate("e=>[e.clientLeft,e.clientTop]")
                 inner_w, inner_h = await owner.evaluate("e=>[e.clientWidth,e.clientHeight]")
                 # hCaptcha's last 90px hold refresh/skip/verify and accessibility controls, never answers.
-                region = {"x": box["x"] + left, "y": box["y"] + top, "width": inner_w, "height": max(0, inner_h - 90)}
+                region = {
+                    "x": box["x"] + left,
+                    "y": box["y"] + top,
+                    "width": inner_w,
+                    "height": max(0, inner_h - 90),
+                }
                 if region["width"] < 50 or region["height"] < 50:
                     return None
                 image = await page.screenshot(type="jpeg", quality=80, scale="css", clip=region, timeout=3000)
@@ -482,7 +495,7 @@ class CaptchaSolver:
         for frame in page.frames:
             try:
                 values = await frame.evaluate(
-                    "()=>[...document.querySelectorAll('[name=\"h-captcha-response\"],[name=\"g-recaptcha-response\"]')].map(e=>e.value)"
+                    '()=>[...document.querySelectorAll(\'[name="h-captcha-response"],[name="g-recaptcha-response"]\')].map(e=>e.value)'
                 )
             except PlaywrightError:
                 continue
@@ -574,6 +587,7 @@ TEXT_IMAGE = r"""() => {
  }
  return false;
 }"""
+
 
 async def solve(config, page, emit, max_seconds=45):
     solver = CaptchaSolver(config, emit)

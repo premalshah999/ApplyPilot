@@ -13,17 +13,38 @@ from .db import Job, Mailbox, Run, record
 
 # Senders that deliver ATS acknowledgements; employers' own domains are accepted by identity.
 RECEIPT_SENDERS = [
-    "greenhouse.io", "greenhouse-mail.io", "lever.co", "ashbyhq.com", "smartrecruiters.com",
-    "workablemail.com", "workable.com", "bamboohr.com", "jobvite.com", "myworkday.com", "workday.com",
-    "icims.com", "oraclecloud.com", "oracle.com", "taleo.net", "successfactors.com", "sapsf.com",
-    "eightfold.ai", "avature.net", "phenompeople.com", "rippling.com", "breezy.hr", "recruitee.com",
+    "greenhouse.io",
+    "greenhouse-mail.io",
+    "lever.co",
+    "ashbyhq.com",
+    "smartrecruiters.com",
+    "workablemail.com",
+    "workable.com",
+    "bamboohr.com",
+    "jobvite.com",
+    "myworkday.com",
+    "workday.com",
+    "icims.com",
+    "oraclecloud.com",
+    "oracle.com",
+    "taleo.net",
+    "successfactors.com",
+    "sapsf.com",
+    "eightfold.ai",
+    "avature.net",
+    "phenompeople.com",
+    "rippling.com",
+    "breezy.hr",
+    "recruitee.com",
 ]
 
 
 def trusted_sender(domain, job):
     from .mail import sender_allowed, tenant_tokens
 
-    if sender_allowed(domain, RECEIPT_SENDERS, tenant_tokens(job.get("url", ""), job.get("company", "")), True):
+    if sender_allowed(
+        domain, RECEIPT_SENDERS, tenant_tokens(job.get("url", ""), job.get("company", "")), True
+    ):
         return True
     # The employer's own domain, by exact name: "zip.co" for Zip Co ("zip"), "ramp.com" for Ramp.
     # Prefix look-alikes ("ziprecruiter.com", "stripe-careers-notify.com") are not the employer.
@@ -33,7 +54,12 @@ def trusted_sender(domain, job):
     words = [w for w in re.split(r"[^a-z0-9]+", (job.get("company") or "").casefold()) if w]
     compact = "".join(words)
     first = words[0] if words else ""
-    return len(name) >= 3 and name in {compact, first, compact.removesuffix("co"), compact.removesuffix("inc")}
+    return len(name) >= 3 and name in {
+        compact,
+        first,
+        compact.removesuffix("co"),
+        compact.removesuffix("inc"),
+    }
 
 
 def acknowledgement(message, job, run, allow_missing_title=False):

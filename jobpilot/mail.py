@@ -55,17 +55,65 @@ GENERIC_LOCAL = re.compile(
     r"candidates?|hello|team|accounts?|security|verify|verification)$"
 )
 GENERIC_LABELS = {
-    "www", "careers", "career", "jobs", "job", "apply", "recruiting", "external", "candidate",
-    "myworkdayjobs", "myworkdaysite", "myworkday", "workday", "oraclecloud", "oracle", "icims",
-    "taleo", "successfactors", "sapsf", "eightfold", "jobs2web", "com", "net", "org", "edu", "gov",
-    "hcmui", "candidateexperience", "sites", "inc", "corp", "corporation", "company", "group",
-    "holdings", "technologies", "technology", "solutions", "services", "international", "global",
-    "the", "and", "limited", "llc", "partners",
+    "www",
+    "careers",
+    "career",
+    "jobs",
+    "job",
+    "apply",
+    "recruiting",
+    "external",
+    "candidate",
+    "myworkdayjobs",
+    "myworkdaysite",
+    "myworkday",
+    "workday",
+    "oraclecloud",
+    "oracle",
+    "icims",
+    "taleo",
+    "successfactors",
+    "sapsf",
+    "eightfold",
+    "jobs2web",
+    "com",
+    "net",
+    "org",
+    "edu",
+    "gov",
+    "hcmui",
+    "candidateexperience",
+    "sites",
+    "inc",
+    "corp",
+    "corporation",
+    "company",
+    "group",
+    "holdings",
+    "technologies",
+    "technology",
+    "solutions",
+    "services",
+    "international",
+    "global",
+    "the",
+    "and",
+    "limited",
+    "llc",
+    "partners",
 }
 # Families whose verification mail often comes from the employer's own domain via the ATS.
 EMPLOYER_SENDER_FAMILIES = {
-    "oracle", "icims", "taleo", "successfactors", "eightfold", "smartrecruiters", "avature",
-    "jobvite", "phenom", "custom",
+    "oracle",
+    "icims",
+    "taleo",
+    "successfactors",
+    "eightfold",
+    "smartrecruiters",
+    "avature",
+    "jobvite",
+    "phenom",
+    "custom",
 }
 
 
@@ -119,7 +167,9 @@ def tenant_conflict(address, domain, tokens):
         if domain.endswith("." + suffix):
             labels = [x for x in domain[: -len(suffix) - 1].split(".") if x and x not in GENERIC_LABELS]
             # Region/pod labels (us2, em3, eu1) are infrastructure, not tenants.
-            named = [x for x in labels if not re.fullmatch(r"wd\d+|fa|ocs|mail|email|[a-z]{2,3}\d{1,2}|\d+", x)]
+            named = [
+                x for x in labels if not re.fullmatch(r"wd\d+|fa|ocs|mail|email|[a-z]{2,3}\d{1,2}|\d+", x)
+            ]
             return bool(named) and not any(t in x or x in t for x in named for t in tokens)
     return False
 
@@ -210,7 +260,11 @@ def extract_message(message, rule, challenge, *, identity_only=False):
     if not authenticated:
         return None
     reset = challenge["kind"] == "password_reset"
-    link_cue = r"reset.{0,30}password|password.{0,30}reset" if reset else r"verif|confirm|sign.?in|log.?in|continue|activate"
+    link_cue = (
+        r"reset.{0,30}password|password.{0,30}reset"
+        if reset
+        else r"verif|confirm|sign.?in|log.?in|continue|activate"
+    )
     texts, links, size = [], [], 0
 
     def walk(part, depth=0):
@@ -287,7 +341,7 @@ def extract_message(message, rule, challenge, *, identity_only=False):
             continue
     kind = challenge["kind"]
     if identity_only:
-        return {"kind":"link", "value":next(iter(valid_links))} if len(valid_links) == 1 else None
+        return {"kind": "link", "value": next(iter(valid_links))} if len(valid_links) == 1 else None
     if kind in {"code", "auto"} and len(codes) == 1:
         return {"kind": "code", "value": next(iter(codes))}
     if kind in {"link", "auto", "password_reset"} and len(valid_links) == 1 and (reset or not codes):
@@ -561,11 +615,11 @@ class MailService:
         """Known ATS senders are scoped to this employer and the applicant's mailbox."""
         existing = self.rule_for(job["url"])
         if existing:
-            if job.get('ats') == 'workday' and existing['sender_domains'] == ['myworkday.com']:
+            if job.get("ats") == "workday" and existing["sender_domains"] == ["myworkday.com"]:
                 with self.db.exclusive() as s:
-                    row = s.get(MailRule, existing['id'])
-                    row.sender_domains = ['myworkday.com', 'otp.workday.com']
-                existing['sender_domains'] = ['myworkday.com', 'otp.workday.com']
+                    row = s.get(MailRule, existing["id"])
+                    row.sender_domains = ["myworkday.com", "otp.workday.com"]
+                existing["sender_domains"] = ["myworkday.com", "otp.workday.com"]
             return existing
         known = KNOWN_SENDERS
         if job.get("ats") not in known:
@@ -593,40 +647,56 @@ class MailService:
         A code alone is insufficient to attribute a shared ATS sender. Require an
         exact employer-origin verification link in the same fresh message.
         """
-        if existing := self.rule_for(job['url']):
+        if existing := self.rule_for(job["url"]):
             return existing
         with self.db.session() as s:
-            box = s.scalar(select(Mailbox).where(Mailbox.email == recipient.lower(), Mailbox.state == 'connected'))
+            box = s.scalar(
+                select(Mailbox).where(Mailbox.email == recipient.lower(), Mailbox.state == "connected")
+            )
             if not box:
                 return None
             mailbox_id = box.id
-        listed = await self.request(mailbox_id, '/messages', {
-            'q': f'after:{int(since)} to:{recipient} {{subject:verify subject:verification subject:confirm subject:activate subject:code}}',
-            'maxResults': 10, 'includeSpamTrash': 'false',
-        })
-        if listed.get('nextPageToken'):
+        listed = await self.request(
+            mailbox_id,
+            "/messages",
+            {
+                "q": f"after:{int(since)} to:{recipient} {{subject:verify subject:verification subject:confirm subject:activate subject:code}}",
+                "maxResults": 10,
+                "includeSpamTrash": "false",
+            },
+        )
+        if listed.get("nextPageToken"):
             return None
         matches = set()
-        for item in listed.get('messages', []):
-            message = await self.request(mailbox_id, '/messages/' + item['id'], {'format':'full'})
-            headers = message.get('payload', {}).get('headers', [])
-            senders = getaddresses([h['value'] for h in headers if h['name'].lower() == 'from'])
+        for item in listed.get("messages", []):
+            message = await self.request(mailbox_id, "/messages/" + item["id"], {"format": "full"})
+            headers = message.get("payload", {}).get("headers", [])
+            senders = getaddresses([h["value"] for h in headers if h["name"].lower() == "from"])
             if len(senders) != 1:
                 continue
-            domain = senders[0][1].rpartition('@')[2].lower()
-            rule = {'sender_domains':[domain], 'link_origins':[origin(job['url'])]}
-            challenge = {'since':since, 'expires':time.time()+1, 'recipient':recipient, 'kind':'password_reset'}
+            domain = senders[0][1].rpartition("@")[2].lower()
+            rule = {"sender_domains": [domain], "link_origins": [origin(job["url"])]}
+            challenge = {
+                "since": since,
+                "expires": time.time() + 1,
+                "recipient": recipient,
+                "kind": "password_reset",
+            }
             # Link extraction normally avoids ambiguous code+link messages. Here
             # we only use the link to prove employer ownership, never open it.
-            token = extract_message(message, rule, {**challenge, 'kind':'link'}, identity_only=True)
-            if token and token['kind'] == 'link':
+            token = extract_message(message, rule, {**challenge, "kind": "link"}, identity_only=True)
+            if token and token["kind"] == "link":
                 matches.add(domain)
         if len(matches) != 1:
             return None
-        return await self.save_rule(RuleInput(
-            mailbox_id=mailbox_id, employer_origin=origin(job['url']),
-            sender_domains=list(matches), link_origins=[origin(job['url'])],
-        ))
+        return await self.save_rule(
+            RuleInput(
+                mailbox_id=mailbox_id,
+                employer_origin=origin(job["url"]),
+                sender_domains=list(matches),
+                link_origins=[origin(job["url"])],
+            )
+        )
 
     def begin(self, run_id, rule, recipient, kind="auto", since=None):
         if kind not in {"auto", "code", "link", "password_reset"} or not re.fullmatch(
@@ -644,7 +714,11 @@ class MailService:
             )
             if previous and previous.expires <= current:
                 # Past its deadline: close it instead of reusing a window that can no longer match.
-                previous.state, previous.payload, previous.reason = "expired", "", "Verification deadline ended"
+                previous.state, previous.payload, previous.reason = (
+                    "expired",
+                    "",
+                    "Verification deadline ended",
+                )
                 previous = None
             if previous:
                 return record(previous)

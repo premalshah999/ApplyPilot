@@ -40,7 +40,10 @@ def message(text, sender="acme@myworkday.com", link=None, link_text="Verify Acco
     return FakeGmail(to).deliver(to, sender, "Verify your candidate account", text, link, link_text, auth)
 
 
-WORKDAY_RULE = {"sender_domains": ["myworkday.com", "otp.workday.com"], "link_origins": ["https://acme.wd5.myworkdayjobs.com"]}
+WORKDAY_RULE = {
+    "sender_domains": ["myworkday.com", "otp.workday.com"],
+    "link_origins": ["https://acme.wd5.myworkdayjobs.com"],
+}
 
 
 def test_link_extraction_ignores_untrusted_links():
@@ -73,7 +76,12 @@ def test_code_extraction(text, code):
 
 def test_ambiguous_or_unauthenticated_codes_are_never_used():
     rule = {"sender_domains": ["oraclecloud.com"], "link_origins": []}
-    assert extract_message(message("code 111111 or code 222222", sender="x@oraclecloud.com"), rule, window("code")) is None
+    assert (
+        extract_message(
+            message("code 111111 or code 222222", sender="x@oraclecloud.com"), rule, window("code")
+        )
+        is None
+    )
     spoofed = message("Your verification code is 739104.", sender="x@oraclecloud.com", auth=False)
     assert extract_message(spoofed, rule, window("code")) is None
 
@@ -95,15 +103,30 @@ def test_tenant_identity_on_shared_ats_senders():
     assert extract_message(shared, WORKDAY_RULE, window("code", tokens))["value"] == "739104"
     # Another Oracle tenant's pod is rejected; region labels are not tenants.
     rule = {"sender_domains": ["oraclecloud.com"], "link_origins": []}
-    tokens = tenant_tokens("https://jpmc.fa.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1002/job/1", "JPMorgan Chase")
-    assert extract_message(message("Your verification code is 739104.", sender="x@globex.fa.oraclecloud.com"), rule, window("code", tokens)) is None
-    assert extract_message(message("Your verification code is 739104.", sender="x@us2.fa.oraclecloud.com"), rule, window("code", tokens))
+    tokens = tenant_tokens(
+        "https://jpmc.fa.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1002/job/1", "JPMorgan Chase"
+    )
+    assert (
+        extract_message(
+            message("Your verification code is 739104.", sender="x@globex.fa.oraclecloud.com"),
+            rule,
+            window("code", tokens),
+        )
+        is None
+    )
+    assert extract_message(
+        message("Your verification code is 739104.", sender="x@us2.fa.oraclecloud.com"),
+        rule,
+        window("code", tokens),
+    )
 
 
 def test_employer_owned_sender_needs_family_permission():
     rule = {"sender_domains": ["icims.com"], "link_origins": []}
     msg = message("Your verification code is 739104.", sender="careers@healthedge.com")
-    tokens = tenant_tokens("https://careers-healthedge.icims.com/jobs/8601/machine-learning-engineer/job", "HealthEdge")
+    tokens = tenant_tokens(
+        "https://careers-healthedge.icims.com/jobs/8601/machine-learning-engineer/job", "HealthEdge"
+    )
     assert extract_message(msg, rule, window("code", tokens)) is None
     assert extract_message(msg, rule, window("code", tokens, employer_senders=True))["value"] == "739104"
     lookalike = message("Your verification code is 739104.", sender="careers@evil-healthedge.com")
@@ -118,17 +141,31 @@ async def test_inbox_lease_serializes_shared_senders_and_consumes_once(service, 
     gmail = FakeGmail(EMAIL).connect(service)
     runs = []
     for host in ("acme.wd5", "globex.wd1"):
-        job, _ = add_job(service.db, JobInput(url=f"https://{host}.myworkdayjobs.com/External/job/X_R9", company=host.split(".")[0].title()))
+        job, _ = add_job(
+            service.db,
+            JobInput(
+                url=f"https://{host}.myworkdayjobs.com/External/job/X_R9", company=host.split(".")[0].title()
+            ),
+        )
         run = await service.queue(job["id"], resume_id=prepared["id"])
         with service.db.session() as s:
             s.get(Run, run["id"]).state = "running"
-            runs.append((run["id"], {"url": job["url"], "ats": "workday", "company": s.get(Job, job["id"]).company}))
+            runs.append(
+                (run["id"], {"url": job["url"], "ats": "workday", "company": s.get(Job, job["id"]).company})
+            )
     first = await service.inbox.arm(runs[0][0], runs[0][1], EMAIL, "link", since=time.time() - 5)
     assert first and first["rule"]["sender_domains"] == ["myworkday.com", "otp.workday.com"]
     with pytest.raises(ValueError, match="Another application is verifying"):
         # A second Workday employer waits for the lease instead of reading the same sender.
         await service.inbox.arm(runs[1][0], runs[1][1], EMAIL, "link", patience=0)
-    gmail.deliver(EMAIL, "acme@myworkday.com", "Verify", "Verify your account.", "https://acme.wd5.myworkdayjobs.com/External/activate/y", "Verify Account")
+    gmail.deliver(
+        EMAIL,
+        "acme@myworkday.com",
+        "Verify",
+        "Verify your account.",
+        "https://acme.wd5.myworkdayjobs.com/External/activate/y",
+        "Verify Account",
+    )
     token = await service.inbox.wait(first)
     assert token["value"].endswith("/activate/y")
     service.inbox.finish(first, "verified", "Website accepted")
@@ -141,11 +178,20 @@ async def test_inbox_lease_serializes_shared_senders_and_consumes_once(service, 
 def test_knowledge_scope_negation_and_options(service):
     save(service.db, "Do you have production experience with Kubernetes?", "Yes", ["Yes", "No"], "Globex")
     kb = KnowledgeBase(service.db)
-    assert kb_norm("Have you previously worked for Acme Inc?", "Acme Inc") == "have you previously worked for employer"
+    assert (
+        kb_norm("Have you previously worked for Acme Inc?", "Acme Inc")
+        == "have you previously worked for employer"
+    )
     hit = kb.lookup("Do you have production experience with Kubernetes? *", ["Yes", "No"], "Acme", "radio")
     assert hit and hit[1] == "Yes"  # A personal fact transfers across employers.
-    assert kb.lookup("Do you not have production experience with Kubernetes?", ["Yes", "No"], "Acme", "radio") is None
-    assert kb.lookup("Do you have production experience with Kubernetes?", ["Never", "Once"], "Acme", "radio") is None
+    assert (
+        kb.lookup("Do you not have production experience with Kubernetes?", ["Yes", "No"], "Acme", "radio")
+        is None
+    )
+    assert (
+        kb.lookup("Do you have production experience with Kubernetes?", ["Never", "Once"], "Acme", "radio")
+        is None
+    )
     # Relationships and motivations stay with their employer.
     save(service.db, "Have you previously worked for Globex?", "No", ["Yes", "No"], "Globex")
     save(service.db, "Why do you want to work at Globex?", "Because Globex builds X " * 5, [], "Globex")
@@ -173,7 +219,11 @@ async def test_live_question_preempts_a_stale_one_and_answer_is_saved(service, p
     monkeypatch.setattr("jobpilot.telegram.api", fake)
     old_job, _ = add_job(service.db, JobInput(url="https://example.test/job/old", company="Old"))
     old = await service.queue(old_job["id"], resume_id=prepared["id"])
-    service.complete(old["id"], {"state": "needs_review", "reviews": [{"question": "Old question?", "options": [], "key": "old"}]}, 1)
+    service.complete(
+        old["id"],
+        {"state": "needs_review", "reviews": [{"question": "Old question?", "options": [], "key": "old"}]},
+        1,
+    )
     from jobpilot.telegram import ask_next_question
 
     await ask_next_question(service)
@@ -189,18 +239,36 @@ async def test_live_question_preempts_a_stale_one_and_answer_is_saved(service, p
 
         while not any("Years of Kubernetes experience?" in p["text"] for p in sent):
             await asyncio.sleep(0.05)
-        await handle_update(service, {"message": {"from": {"id": 777}, "text": "3 years", "reply_to_message": {"message_id": len(sent)}}})
+        await handle_update(
+            service,
+            {
+                "message": {
+                    "from": {"id": 777},
+                    "text": "3 years",
+                    "reply_to_message": {"message_id": len(sent)},
+                }
+            },
+        )
 
     import asyncio
 
     task = asyncio.create_task(reply())
-    answered = await ask(service, live["id"], [{"question": "Years of Kubernetes experience?", "options": [], "key": "k8s-years"}], 5)
+    answered = await ask(
+        service,
+        live["id"],
+        [{"question": "Years of Kubernetes experience?", "options": [], "key": "k8s-years"}],
+        5,
+    )
     await task
     assert answered == 1
     with service.db.session() as s:
         review = s.query(Review).filter_by(run_id=live["id"]).one()
         assert review.answer == "3 years"
-    learned = [a for a in service.db.get_setting("profile")["reviewed_answers"] if a["question"] == "Years of Kubernetes experience?"]
+    learned = [
+        a
+        for a in service.db.get_setting("profile")["reviewed_answers"]
+        if a["question"] == "Years of Kubernetes experience?"
+    ]
     assert learned and learned[0]["answer"] == "3 years"
 
 
@@ -233,15 +301,19 @@ def test_password_policy_origin_allowlist_and_shared_login(service):
 def test_detection_and_entry_urls():
     assert detect("https://acme.eightfold.ai/careers?pid=1").id == "eightfold"
     assert detect("https://acme.taleo.net/careersection/2/jobdetail.ftl?job=1").id == "taleo"
-    assert detect_embedded([("frame", "https://careers-acme.icims.com/jobs/1/x/job?in_iframe=1")])[0] == "icims"
-    assert Workday.prepare_url("https://a.wd5.myworkdayjobs.com/en-US/X/job/NY/Eng_R1/apply/applyManually") == (
-        "https://a.wd5.myworkdayjobs.com/en-US/X/job/NY/Eng_R1"
+    assert (
+        detect_embedded([("frame", "https://careers-acme.icims.com/jobs/1/x/job?in_iframe=1")])[0] == "icims"
     )
+    assert Workday.prepare_url(
+        "https://a.wd5.myworkdayjobs.com/en-US/X/job/NY/Eng_R1/apply/applyManually"
+    ) == ("https://a.wd5.myworkdayjobs.com/en-US/X/job/NY/Eng_R1")
     assert "in_iframe=1" in ICIMS.prepare_url("https://careers-acme.icims.com/jobs/1/eng/job")
 
 
 def test_resolver_screening_intents_negation_and_source(config, service):
-    p = Profile(facts={"requires_sponsorship": False, "work_authorized_us": True}, application_source="LinkedIn")
+    p = Profile(
+        facts={"requires_sponsorship": False, "work_authorized_us": True}, application_source="LinkedIn"
+    )
     r = Resolver(p, service.db, config)
     f = lambda label, options=("Yes", "No"), **extra: {  # noqa: E731
         "id": "x",
@@ -258,17 +330,26 @@ def test_resolver_screening_intents_negation_and_source(config, service):
     assert r.local(f("Will you not require sponsorship?")) is None
     assert r.local(f("How did you hear about us?", ["Indeed", "LinkedIn"])).value == "LinkedIn"
     # Search-driven pickers receive the source itself; the widget finds the nested leaf.
-    assert r.local(f("How Did You Hear About Us?", ["Job Boards", "Referral"], options_partial=True)).value == "LinkedIn"
+    assert (
+        r.local(f("How Did You Hear About Us?", ["Job Boards", "Referral"], options_partial=True)).value
+        == "LinkedIn"
+    )
 
 
 def test_address_facts_migrate_into_the_structured_address():
     # A profile saved before the structured address existed (main's profiles) gets one once.
-    p = Profile.model_validate({"facts": {"street_address": "1 Main St", "zip_code": "10001", "city": "New York"},
-                                "unknown_future_key": {"kept": True}})
+    p = Profile.model_validate(
+        {
+            "facts": {"street_address": "1 Main St", "zip_code": "10001", "city": "New York"},
+            "unknown_future_key": {"kept": True},
+        }
+    )
     assert (p.address.line1, p.address.postal_code, p.address.city) == ("1 Main St", "10001", "New York")
     assert p.model_dump()["unknown_future_key"] == {"kept": True}
     # Afterwards the stored address is authoritative (saves keep facts and address in sync).
-    kept = Profile.model_validate({"facts": {"street_address": "1 Main St"}, "address": {"line1": "9 New Ave"}})
+    kept = Profile.model_validate(
+        {"facts": {"street_address": "1 Main St"}, "address": {"line1": "9 New Ave"}}
+    )
     assert kept.address.line1 == "9 New Ave"
 
 
@@ -294,7 +375,9 @@ async def test_invisible_recaptcha_and_turnstile_iframe_tasks(page, config, monk
         '<input name="cf-turnstile-response" type="hidden">'
     )
     await CaptchaSolver(config, lambda *a: None).solve(page)
-    assert tasks[-1]["type"] == "AntiTurnstileTaskProxyLess" and tasks[-1]["websiteKey"] == "0x4AAAAAAAtestkey"
+    assert (
+        tasks[-1]["type"] == "AntiTurnstileTaskProxyLess" and tasks[-1]["websiteKey"] == "0x4AAAAAAAtestkey"
+    )
 
 
 HCAPTCHA = """<style>body{margin:0;font:14px Arial}.challenge-header{height:110px;background:#36c}
@@ -317,7 +400,9 @@ async def test_hcaptcha_puzzle_crop_rounds_and_coordinate_transform(page, config
 
     config.twocaptcha_api_key = "fixture-2captcha"
     config.captcha_max_rounds = 4
-    await page.route("https://newassets.hcaptcha.example/**", lambda r: r.fulfill(content_type="text/html", body=HCAPTCHA))
+    await page.route(
+        "https://newassets.hcaptcha.example/**", lambda r: r.fulfill(content_type="text/html", body=HCAPTCHA)
+    )
     await page.set_content(
         '<p>PRIVATE APPLICATION</p><iframe title="hCaptcha challenge" src="https://newassets.hcaptcha.example/c" '
         'style="position:absolute;left:30px;top:40px;width:420px;height:500px;border:0"></iframe>'
@@ -349,14 +434,19 @@ async def test_hcaptcha_stale_and_out_of_bounds_solutions_are_rejected(page, con
     from jobpilot.capsolver import CaptchaSolver
 
     config.twocaptcha_api_key = "fixture-2captcha"
-    await page.route("https://newassets.hcaptcha.example/**", lambda r: r.fulfill(content_type="text/html", body=HCAPTCHA))
+    await page.route(
+        "https://newassets.hcaptcha.example/**", lambda r: r.fulfill(content_type="text/html", body=HCAPTCHA)
+    )
     await page.set_content(
         '<iframe title="hCaptcha challenge" src="https://newassets.hcaptcha.example/c" style="width:420px;height:500px;border:0"></iframe>'
         "<script>window.clicks=[];addEventListener('message',e=>window.clicks.push(e.data))</script>"
     )
     frame = page.frames[-1]
     await frame.wait_for_load_state()
-    monkeypatch.setattr("jobpilot.capsolver.task_result", AsyncMock(return_value=({"coordinates": [{"x": 100, "y": 320}]}, None)))
+    monkeypatch.setattr(
+        "jobpilot.capsolver.task_result",
+        AsyncMock(return_value=({"coordinates": [{"x": 100, "y": 320}]}, None)),
+    )
     solver = CaptchaSolver(config, lambda *a: None)
     assert not await solver.solve(page)
     assert "outside the puzzle" in solver.last_reason
@@ -372,7 +462,10 @@ async def test_hcaptcha_stale_and_out_of_bounds_solutions_are_rejected(page, con
     assert await page.evaluate("window.clicks") == []
     # Bounded: no more paid rounds than CAPTCHA_MAX_ROUNDS in one run.
     config.captcha_max_rounds = 1
-    monkeypatch.setattr("jobpilot.capsolver.task_result", AsyncMock(return_value=({"coordinates": [{"x": 10, "y": 10}]}, None)))
+    monkeypatch.setattr(
+        "jobpilot.capsolver.task_result",
+        AsyncMock(return_value=({"coordinates": [{"x": 10, "y": 10}]}, None)),
+    )
     solver = CaptchaSolver(config, lambda *a: None)
     assert not await solver.solve(page)
     assert solver.rounds == 1 and "CAPTCHA_MAX_ROUNDS" in solver.last_reason

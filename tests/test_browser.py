@@ -46,8 +46,13 @@ def server(tmp_path_factory):
     url = f"http://127.0.0.1:{port}"
     config = Settings(
         _env_file=None,
-        gmail_address="", gmail_app_password="", telegram_bot_token="", telegram_user_id="",
-        mimo_api_key="", google_client_id="", google_client_secret="",
+        gmail_address="",
+        gmail_app_password="",
+        telegram_bot_token="",
+        telegram_user_id="",
+        mimo_api_key="",
+        google_client_id="",
+        google_client_secret="",
         browser_cdp_url="",
         data_dir=tmp_path_factory.mktemp("integration"),
         app_token="synthetic-fixture-access",

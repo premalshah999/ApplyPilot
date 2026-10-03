@@ -145,13 +145,24 @@ def main():
 
         chrome = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
         with sync_playwright() as pw:
-            executable = config.chromium_path or (str(chrome) if chrome.exists() else pw.chromium.executable_path)
+            executable = config.chromium_path or (
+                str(chrome) if chrome.exists() else pw.chromium.executable_path
+            )
         profile = config.data_dir / "desktop-browser"
         profile.mkdir(parents=True, exist_ok=True, mode=0o700)
         subprocess.Popen(
-            [executable, f"--remote-debugging-port={args.port}", "--remote-debugging-address=127.0.0.1",
-             f"--user-data-dir={profile}", "--no-first-run", "--no-default-browser-check", "about:blank"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+            [
+                executable,
+                f"--remote-debugging-port={args.port}",
+                "--remote-debugging-address=127.0.0.1",
+                f"--user-data-dir={profile}",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "about:blank",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
         print("Application browser opened. Leave this Chrome window open while applications run.")
     elif args.command == "verify":

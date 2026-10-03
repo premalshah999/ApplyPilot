@@ -52,7 +52,9 @@ class Service:
     def check_cooldown(self, session, job):
         item = session.get(Setting, self.cooldown_key(job))
         if item and datetime.fromisoformat(item.value["until"]) > datetime.now(UTC):
-            raise ValueError("This employer rejected an application as possible spam. Applications there are paused for six hours; other employers can continue.")
+            raise ValueError(
+                "This employer rejected an application as possible spam. Applications there are paused for six hours; other employers can continue."
+            )
 
     def migrate_reviewed_answers(self):
         """Give existing applicant reviews provenance without changing their answers.
@@ -110,8 +112,13 @@ class Service:
                     options = json.loads(options or "[]")
                 try:
                     save(
-                        self.db, row["question"], row["answer"], options, employer,
-                        "employer" if employer else None, review_id="legacy-" + str(row["id"])[:24],
+                        self.db,
+                        row["question"],
+                        row["answer"],
+                        options,
+                        employer,
+                        "employer" if employer else None,
+                        review_id="legacy-" + str(row["id"])[:24],
                     )
                 except (ValueError, KeyError, TypeError):
                     continue
@@ -133,15 +140,22 @@ class Service:
             moved = 0
             for row in rows:
                 host = (row.get("realm") or "").split(":")[1] if ":" in (row.get("realm") or "") else ""
-                if not host or not row.get("email") or not fingerprint or row.get("password_hash") != fingerprint:
+                if (
+                    not host
+                    or not row.get("email")
+                    or not fingerprint
+                    or row.get("password_hash") != fingerprint
+                ):
                     continue
                 store = AccountStore(self, row["email"])
                 url = "https://" + host
                 if store.get(url):
                     continue  # Never overwrite a record main already keeps for this employer.
-                state = {"active": "authenticated", "verified": "authenticated", "reset": "password_reset"}.get(
-                    row.get("state"), "created_locally"
-                )
+                state = {
+                    "active": "authenticated",
+                    "verified": "authenticated",
+                    "reset": "password_reset",
+                }.get(row.get("state"), "created_locally")
                 store.save(url, {"email": row["email"].lower(), "password": password}, state, migrated=True)
                 moved += 1
             self.db.set_setting("migrated:accounts", {"rows": len(rows), "moved": moved, "at": now()})
@@ -235,7 +249,11 @@ class Service:
             state = result.get("state", "failed")
             if state == "needs_review" and run.packet.get("profile", {}).get("autonomous"):
                 answerable = any(q.get("key") not in {"manual", "session"} for q in result.get("reviews", []))
-                state = "waiting_answer" if answerable and self.config.telegram_bot_token and self.config.telegram_user_id else "skipped"
+                state = (
+                    "waiting_answer"
+                    if answerable and self.config.telegram_bot_token and self.config.telegram_user_id
+                    else "skipped"
+                )
                 questions = [q["question"] for q in result.get("reviews", [])]
                 if questions:
                     result["reason"] = (
@@ -245,13 +263,18 @@ class Service:
                 state = "failed"
             evidence = result.get("receipt", {})
             if state == "confirmed" and not (
-                evidence.get("type") in {"explicit_confirmation_page", "user_reconciled"} or evidence.get("email")
+                evidence.get("type") in {"explicit_confirmation_page", "user_reconciled"}
+                or evidence.get("email")
             ):
                 # "Confirmed" needs a website confirmation, an employer email, or the applicant's word.
                 state = "submission_unknown" if run.state == "submitting" else "needs_review"
                 result = {**result, "reason": "No confirmation evidence was captured"}
             rejected = evidence.get("type") == "explicit_rejection_page"
-            if run.state == "submitting" and state not in {"confirmed", "submission_unknown"} and not rejected:
+            if (
+                run.state == "submitting"
+                and state not in {"confirmed", "submission_unknown"}
+                and not rejected
+            ):
                 state = "submission_unknown"
             run.state, run.reason = state, result.get("reason", "")[:4000]
             run.finished_at, run.elapsed = now(), elapsed
