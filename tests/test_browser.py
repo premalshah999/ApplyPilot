@@ -26,7 +26,8 @@ async def page(config):
         if not Path(path).exists():
             pytest.skip("Install Chromium: playwright install chromium")
         browser = await pw.chromium.launch(executable_path=path, headless=True, args=["--no-sandbox"])
-        page = await browser.new_page()
+        context = await browser.new_context()
+        page = await context.new_page()
         yield page
         await browser.close()
 
@@ -44,6 +45,10 @@ def server(tmp_path_factory):
         port = sock.getsockname()[1]
     url = f"http://127.0.0.1:{port}"
     config = Settings(
+        _env_file=None,
+        gmail_address="", gmail_app_password="", telegram_bot_token="", telegram_user_id="",
+        mimo_api_key="", google_client_id="", google_client_secret="",
+        browser_cdp_url="",
         data_dir=tmp_path_factory.mktemp("integration"),
         app_token="synthetic-fixture-access",
         base_url=url,
@@ -127,6 +132,11 @@ def test_browser_use_and_mimo_protocol_together(server, resume_pdf, monkeypatch)
             raise
 
     monkeypatch.setattr(BrowserEngine, "run", diagnosed_run)
+    # Unknown ATS forms now have a deterministic path too. This test explicitly
+    # exercises the separate model/Browser Use protocol fallback.
+    async def use_agent(self):
+        return None
+    monkeypatch.setattr(BrowserEngine, 'guided_flow', use_agent)
     config.mimo_api_key = "synthetic-provider-key"
     config.mimo_base_url = url + "/fake-mimo/v1"
     config.allow_private_urls = True
@@ -194,6 +204,60 @@ async def test_native_and_conditional_fields_are_read_back(page, service, config
     # An ATS overwriting a contact answer is not accepted as success.
     await page.get_by_label("Email", exact=True).fill("different@example.test")
     assert "Value not accepted: Email" in (await form.verify())["problems"]
+
+
+async def test_file_input_uses_resume_id_when_visible_label_is_generic(page, service, config, tmp_path):
+    await page.set_content("""<h2>Resume/CV</h2><label for="resume">Attach</label>
+      <input id="resume" type="file" class="visually-hidden" style="display:none">
+      <button>Submit application</button>""")
+    form = FormSession(
+        page,
+        Resolver(Profile(), service.db, config),
+        tmp_path / "unused.pdf",
+        lambda *x: None,
+    )
+    await form.scan()
+    files = [f for f in form.fields.values() if f["type"] == "file"]
+    assert len(files) == 1
+    assert files[0]["label"] == "Resume/CV"
+
+
+async def test_react_select_reads_chosen_value_without_proxy_field(page, service, config, tmp_path):
+    await page.set_content("""<label id="question-label" for="question">Related to an employee? *</label>
+      <div class="select__control"><div class="select__multi-value__label">No</div>
+      <input id="question" role="combobox" aria-labelledby="question-label" aria-required="true"></div>
+      <input aria-hidden="true" required tabindex="-1" value="No">""")
+    form = FormSession(
+        page,
+        Resolver(Profile(), service.db, config),
+        tmp_path / "unused.pdf",
+        lambda *x: None,
+    )
+    await form.scan()
+    assert len(form.fields) == 1
+    field = next(iter(form.fields.values()))
+    assert field["label"] == "Related to an employee?"
+    assert field["value"] == "No"
+    assert field["required"]
+
+
+async def test_country_dial_code_display_is_verified(page, service, config, tmp_path):
+    await page.set_content("""<label id="country-label" for="country">Country</label>
+      <div class="select__control"><div class="select__single-value"></div>
+      <input id="country" role="combobox" aria-labelledby="country-label"></div>
+      <div role="option" onclick="document.querySelector('.select__single-value').textContent='+1';document.querySelector('#country').value=''">United States +1</div>""")
+    form = FormSession(
+        page,
+        Resolver(Profile(), service.db, config),
+        tmp_path / "unused.pdf",
+        lambda *x: None,
+    )
+    await form.scan()
+    field = next(f for f in form.fields.values() if f["label"] == "Country")
+    await form.fill(field, "United States +1")
+    report = await form.verify()
+    assert report["ok"] and report["verified_fields"] == 0, report
+    assert form.expected[field["id"]] == "+1"
 
 
 async def test_custom_combobox_commits_option(page, service, config, tmp_path):

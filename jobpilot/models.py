@@ -28,6 +28,7 @@ class MeteredTransport(httpx.AsyncBaseTransport):
             args["response_format"] = {"type": "json_object"}
         args.pop("reasoning_effort", None)
         args.pop("frequency_penalty", None)
+        args.setdefault("thinking", {"type": "disabled"})
         max_tokens = args.pop("max_tokens", 2400)
         args.setdefault("max_completion_tokens", max_tokens)
         body = json.dumps(args).encode()

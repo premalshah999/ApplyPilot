@@ -55,6 +55,8 @@ def main():
     verify.add_argument("--timeout", type=int, default=420, help="Total queue wait budget in seconds")
     login = sub.add_parser("login", help="Capture an employer session using your own local browser")
     login.add_argument("url")
+    desktop = sub.add_parser("browser", help="Open the local application browser for Docker workers")
+    desktop.add_argument("--port", type=int, default=9224)
     args = parser.parse_args()
     config = settings()
     if args.command == "token":
@@ -71,6 +73,22 @@ def main():
         uvicorn.run(create_app(config), host=args.host, port=args.port, log_level="warning")
     elif args.command == "login":
         asyncio.run(capture_session(config, args.url))
+    elif args.command == "browser":
+        import subprocess
+        from pathlib import Path
+        from playwright.sync_api import sync_playwright
+
+        chrome = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        with sync_playwright() as pw:
+            executable = config.chromium_path or (str(chrome) if chrome.exists() else pw.chromium.executable_path)
+        profile = config.data_dir / "desktop-browser"
+        profile.mkdir(parents=True, exist_ok=True, mode=0o700)
+        subprocess.Popen(
+            [executable, f"--remote-debugging-port={args.port}", "--remote-debugging-address=127.0.0.1",
+             f"--user-data-dir={profile}", "--no-first-run", "--no-default-browser-check", "about:blank"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+        print("Application browser opened. Leave this Chrome window open while applications run.")
     elif args.command == "verify":
         import sys
 

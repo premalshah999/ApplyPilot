@@ -23,18 +23,25 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_user_id: str = ""
     capsolver_api_key: str = ""
+    twocaptcha_api_key: str = ""
+    application_password: str = ""
+    captcha_timeout: int = Field(default=90, ge=10, le=180)
+    captcha_max_attempts: int = Field(default=2, ge=1, le=3)
     google_client_id: str = ""
     google_client_secret: str = ""
+    gmail_address: str = ""
+    gmail_app_password: str = ""
     mail_encryption_key: str = ""
     mail_poll_seconds: float = Field(default=3, ge=0.1, le=60)
     mail_wait_seconds: int = Field(default=60, ge=5, le=120)
     workers: int = Field(default=3, ge=1, le=8)
-    application_timeout: int = Field(default=180, ge=30, le=180)
+    application_timeout: int = Field(default=180, ge=30, le=600)
     daily_application_limit: int = Field(default=100, ge=1, le=200)
     daily_budget_usd: float = Field(default=5, gt=0)
     max_model_calls: int = Field(default=18, ge=1, le=40)
     timezone: str = "America/New_York"
     chromium_path: str = ""
+    browser_cdp_url: str = ""
     headless: bool = True
     enable_workers: bool = True
     enable_demo: bool = True

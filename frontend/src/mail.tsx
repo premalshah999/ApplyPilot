@@ -139,11 +139,11 @@ export function MailSettings({
               <Plus size={16} /> Connect Gmail
             </button>
           </div>
-          {!data.configured && (
+          {!data.configured && data.mailboxes.length === 0 && (
             <p className="note small">
-              Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in the server’s .env
-              file, then restart. Enable the Gmail API in your Google Cloud
-              project.
+              For Gmail app passwords, add GMAIL_ADDRESS and GMAIL_APP_PASSWORD to .env and restart.
+              For Google sign-in, add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, enable the Gmail API,
+              and use the redirect address below. Known Greenhouse and Workday verification rules are created automatically.
             </p>
           )}
           <p className="muted small">

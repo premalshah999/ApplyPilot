@@ -23,6 +23,69 @@ APPLICATION = """<h1>Application</h1><form action="/applications" method="post">
 <button>Submit application</button></form>"""
 
 
+async def test_greenhouse_received_wording_is_submission_proof(service, page, tmp_path):
+    await page.set_content(
+        "<h1>Thank you for your interest in May Mobility!</h1>"
+        "<p>Your application has been received.</p>"
+    )
+    form = FormSession(
+        page, Resolver(Profile(), service.db, service.config), tmp_path / "resume.pdf", lambda *a: None
+    )
+    assert "application has been received" in (await form.proof())["confirmation"].lower()
+
+
+async def test_greenhouse_email_code_after_commit_with_mixed_fields(service, page, tmp_path, resume_pdf):
+    from jobpilot.db import Run
+
+    initial = """<p>To submit your application, enter the security code sent to your email.</p>
+    <label>Full name<input value="Alex Example"></label>
+    <label>Security code<input name="code" autocomplete="one-time-code" oninput="document.querySelector('button').disabled=false"></label>
+    <button disabled onclick="document.body.innerHTML='<h1>Application submitted</h1>'">Submit application</button>"""
+    e, _ = await setup_engine(service, page, tmp_path, resume_pdf, initial)
+    e.armed = True
+    with service.db.session() as s:
+        s.get(Run, e.run_id).state = "submitting"
+    service.mail.transport = provider([message()])
+    poller = asyncio.create_task(service.mail.poll())
+    try:
+        assert await e.email_verification.handle()
+        assert await e.form.proof()
+        assert "483921" not in json.dumps(e.form.ledger)
+    finally:
+        poller.cancel()
+        await asyncio.gather(poller, return_exceptions=True)
+
+
+async def test_greenhouse_eight_one_character_inputs(service, page, tmp_path, resume_pdf):
+    from jobpilot.db import Run
+
+    digits = "".join(
+        f'<input name="digit{i}" aria-label="{"Security code" if i == 0 else "Digit " + str(i + 1)}" maxlength="1">'
+        for i in range(8)
+    )
+    html = (
+        '<p>To submit your application, enter the 8-character security code.</p><label>Full name<input value="Alex Example"></label>'
+        + digits
+        + "<button disabled onclick=\"document.body.innerHTML='<h1>Application submitted</h1>'\">Submit application</button>"
+        + '<script>document.addEventListener("input",()=>{document.querySelector("button").disabled=[...document.querySelectorAll("input[maxlength=\\"1\\"]")].some(e=>!e.value)})</script>'
+    )
+    e, _ = await setup_engine(service, page, tmp_path, resume_pdf, html)
+    e.armed = True
+    with service.db.session() as s:
+        s.get(Run, e.run_id).state = "submitting"
+    service.mail.transport = provider(
+        [message("Copy and paste this code into the security code field on your application: a1BcDeFG")]
+    )
+    poller = asyncio.create_task(service.mail.poll())
+    try:
+        assert await e.email_verification.handle()
+        assert await e.form.proof()
+        assert "a1BcDeFG" not in json.dumps(e.form.ledger)
+    finally:
+        poller.cancel()
+        await asyncio.gather(poller, return_exceptions=True)
+
+
 async def setup_engine(service, page, tmp_path, resume_pdf, initial, *, split=False, redirect=False):
     box, run, rule = await configured(service)
     cfg = service.config

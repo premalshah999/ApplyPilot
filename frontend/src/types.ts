@@ -69,6 +69,12 @@ export type Profile = {
   decline_demographics: boolean;
   approved_consents: string[];
   approved_answers: Record<string, string>;
+  reviewed_answers: { id: string; question: string; answer: string; employer: string; scope: "personal" | "employer"; layer: "fact" | "narrative" }[];
+  application_source: string;
+  allow_account_creation: boolean;
+  allow_application_consents: boolean;
+  accept_all_application_terms: boolean;
+  autonomous: boolean;
 };
 export type Snapshot = {
   jobs: Job[];

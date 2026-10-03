@@ -75,7 +75,7 @@ class Vault:
         return json.loads(self.cipher.decrypt(value.encode()))
 
 
-def extract_message(message, rule, challenge):
+def extract_message(message, rule, challenge, *, identity_only=False):
     """Return one unambiguous token; message text never becomes model instructions."""
     received = int(message.get("internalDate", "0")) / 1000
     if received < challenge["since"] or received > challenge["expires"]:
@@ -107,6 +107,8 @@ def extract_message(message, rule, challenge):
     )
     if not authenticated:
         return None
+    reset = challenge["kind"] == "password_reset"
+    link_cue = r"reset.{0,30}password|password.{0,30}reset" if reset else r"verif|confirm|sign.?in|log.?in|continue|activate"
     texts, links, size = [], [], 0
 
     def walk(part, depth=0):
@@ -129,13 +131,13 @@ def extract_message(message, rule, challenge):
             texts.append(text)
             if soup:
                 for a in soup.select("a[href]"):
-                    if re.search(r"verif|confirm|sign.?in|log.?in|continue|activate", a.get_text(" "), re.I):
+                    if re.search(link_cue, a.get_text(" "), re.I):
                         links.append(a["href"])
             else:
                 # Plain-text links need a verification cue on the adjacent line.
                 for match in re.finditer(r"https://[^\s<>\"']+", raw):
                     if re.search(
-                        r"verif|confirm|sign.?in|log.?in|activate",
+                        link_cue,
                         raw[max(0, match.start() - 120) : match.end()],
                         re.I,
                     ):
@@ -148,6 +150,12 @@ def extract_message(message, rule, challenge):
     codes = set(
         re.findall(
             r"(?i:\b(?:verification code|security code|authentication code|one.time (?:code|passcode|password)|confirmation code|login code|sign.in code|otp|code|pin)\s*(?:(?:is|below)\s*)?[:#-]?\s*)\b([A-Z0-9]{4,10})\b",
+            text,
+        )
+    )
+    codes.update(
+        re.findall(
+            r"(?i:security code field on your application\s*:)\s*([A-Za-z0-9]{8})\b",
             text,
         )
     )
@@ -166,9 +174,11 @@ def extract_message(message, rule, challenge):
         except ValueError:
             continue
     kind = challenge["kind"]
+    if identity_only:
+        return {"kind":"link", "value":next(iter(valid_links))} if len(valid_links) == 1 else None
     if kind in {"code", "auto"} and len(codes) == 1:
         return {"kind": "code", "value": next(iter(codes))}
-    if kind in {"link", "auto"} and len(valid_links) == 1 and not codes:
+    if kind in {"link", "auto", "password_reset"} and len(valid_links) == 1 and (reset or not codes):
         return {"kind": "link", "value": next(iter(valid_links))}
     return None
 
@@ -180,6 +190,15 @@ class MailService:
         self.transport = None  # An injected transport is used only by owned fixtures.
         self.locks = {}
         self.poll_lock = asyncio.Lock()
+        if config.gmail_address and config.gmail_app_password:
+            email = config.gmail_address.strip().lower()
+            with db.exclusive() as s:
+                box = s.scalar(select(Mailbox).where(Mailbox.email == email))
+                value = {"provider": "gmail_imap", "address": email}
+                if not box:
+                    s.add(Mailbox(email=email, credentials=self.vault.seal(value)))
+                elif self.vault.open(box.credentials).get("provider") == "gmail_imap":
+                    box.credentials, box.state, box.error = self.vault.seal(value), "connected", ""
 
     def client(self):
         return httpx.AsyncClient(
@@ -294,6 +313,31 @@ class MailService:
                     raise ValueError("Reconnect the Gmail mailbox")
                 stored = box.credentials
                 token = self.vault.open(stored)
+            if token.get("provider") == "gmail_imap":
+                from .gmail_imap import request
+
+                if (
+                    token["address"] != self.config.gmail_address.strip().lower()
+                    or not self.config.gmail_app_password
+                ):
+                    raise ValueError("Restore GMAIL_ADDRESS and GMAIL_APP_PASSWORD in .env")
+                try:
+                    result = await asyncio.to_thread(
+                        request,
+                        token["address"],
+                        "".join(self.config.gmail_app_password.split()),
+                        path,
+                        params,
+                    )
+                except Exception:
+                    self.connection_error(
+                        mailbox_id, "reconnect_required", "Gmail login failed; check the app password in .env"
+                    )
+                    raise ValueError("Gmail login failed; check the app password in .env") from None
+                with self.db.exclusive() as s:
+                    if box := s.get(Mailbox, mailbox_id):
+                        box.checked_at, box.error = now(), ""
+                return result
             async with self.client() as client:
                 if token.get("expires_at", 0) < time.time() + 60:
                     r = await client.post(
@@ -401,8 +445,87 @@ class MailService:
                     return record(rule)
         return None
 
+    async def ensure_rule(self, job, recipient):
+        """Known ATS senders are scoped to this employer and the applicant's mailbox."""
+        existing = self.rule_for(job["url"])
+        if existing:
+            if job.get('ats') == 'workday' and existing['sender_domains'] == ['myworkday.com']:
+                with self.db.exclusive() as s:
+                    row = s.get(MailRule, existing['id'])
+                    row.sender_domains = ['myworkday.com', 'otp.workday.com']
+                existing['sender_domains'] = ['myworkday.com', 'otp.workday.com']
+            return existing
+        known = {
+            "greenhouse": [
+                "greenhouse.io",
+                "us.greenhouse-mail.io",
+                "eu.greenhouse-mail.io",
+                "anz.greenhouse.io",
+            ],
+            "workday": ["myworkday.com", "otp.workday.com"],
+        }
+        if job.get("ats") not in known:
+            return None
+        with self.db.session() as s:
+            box = s.scalar(
+                select(Mailbox).where(Mailbox.email == recipient.lower(), Mailbox.state == "connected")
+            )
+            if not box:
+                return None
+            mailbox_id = box.id
+        url = urlsplit(job["url"])
+        prefix = "/" + url.path.strip("/").split("/")[0] if job["ats"] == "greenhouse" else "/"
+        return await self.save_rule(
+            RuleInput(
+                mailbox_id=mailbox_id,
+                employer_origin=origin(job["url"]) + prefix,
+                sender_domains=known[job["ats"]],
+            )
+        )
+
+    async def discover_rule(self, job, recipient, since):
+        """Learn an unfamiliar sender only from authenticated, employer-bound mail.
+
+        A code alone is insufficient to attribute a shared ATS sender. Require an
+        exact employer-origin verification link in the same fresh message.
+        """
+        if existing := self.rule_for(job['url']):
+            return existing
+        with self.db.session() as s:
+            box = s.scalar(select(Mailbox).where(Mailbox.email == recipient.lower(), Mailbox.state == 'connected'))
+            if not box:
+                return None
+            mailbox_id = box.id
+        listed = await self.request(mailbox_id, '/messages', {
+            'q': f'after:{int(since)} to:{recipient} {{subject:verify subject:verification subject:confirm subject:activate subject:code}}',
+            'maxResults': 10, 'includeSpamTrash': 'false',
+        })
+        if listed.get('nextPageToken'):
+            return None
+        matches = set()
+        for item in listed.get('messages', []):
+            message = await self.request(mailbox_id, '/messages/' + item['id'], {'format':'full'})
+            headers = message.get('payload', {}).get('headers', [])
+            senders = getaddresses([h['value'] for h in headers if h['name'].lower() == 'from'])
+            if len(senders) != 1:
+                continue
+            domain = senders[0][1].rpartition('@')[2].lower()
+            rule = {'sender_domains':[domain], 'link_origins':[origin(job['url'])]}
+            challenge = {'since':since, 'expires':time.time()+1, 'recipient':recipient, 'kind':'password_reset'}
+            # Link extraction normally avoids ambiguous code+link messages. Here
+            # we only use the link to prove employer ownership, never open it.
+            token = extract_message(message, rule, {**challenge, 'kind':'link'}, identity_only=True)
+            if token and token['kind'] == 'link':
+                matches.add(domain)
+        if len(matches) != 1:
+            return None
+        return await self.save_rule(RuleInput(
+            mailbox_id=mailbox_id, employer_origin=origin(job['url']),
+            sender_domains=list(matches), link_origins=[origin(job['url'])],
+        ))
+
     def begin(self, run_id, rule, recipient, kind="auto", since=None):
-        if kind not in {"auto", "code", "link"} or not re.fullmatch(
+        if kind not in {"auto", "code", "link", "password_reset"} or not re.fullmatch(
             r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,63}", recipient
         ):
             raise ValueError("Email verification requires a valid applicant email address")
@@ -410,7 +533,7 @@ class MailService:
         with self.db.exclusive() as s:
             run = s.get(Run, run_id)
             box = s.get(Mailbox, rule["mailbox_id"])
-            if not run or run.state != "running" or not box or box.state != "connected":
+            if not run or run.state not in {"running", "submitting"} or not box or box.state != "connected":
                 raise ValueError("Verification requires a running application and connected mailbox")
             previous = s.scalar(
                 select(MailChallenge).where(MailChallenge.run_id == run_id, MailChallenge.state.in_(LIVE))
@@ -479,7 +602,7 @@ class MailService:
                 current = time.time()
                 for c in s.scalars(select(MailChallenge).where(MailChallenge.state.in_(LIVE))):
                     run = s.get(Run, c.run_id)
-                    if c.expires < current or not run or run.state != "running":
+                    if c.expires < current or not run or run.state not in {"running", "submitting"}:
                         c.state, c.payload, c.reason = (
                             "expired",
                             "",
@@ -556,9 +679,15 @@ class MailService:
                                 row.state, row.payload = "failed", ""
 
     async def poll(self):
+        last_receipts = 0
         while True:
             try:
                 await self.poll_once()
+                if time.time() - last_receipts > 60:
+                    from .receipts import check_receipts
+
+                    last_receipts = time.time()
+                    await check_receipts(self)
             except Exception:
                 pass  # Connection/challenge status is the public diagnostic, never secret-bearing errors.
             await asyncio.sleep(self.config.mail_poll_seconds)
@@ -580,6 +709,12 @@ class MailService:
                 ):
                     c.state, c.payload, c.reason = "cancelled", "", "Mailbox disconnected"
             revoked = False
+            if token.get("provider") == "gmail_imap":
+                return {
+                    "disconnected": True,
+                    "revoked": False,
+                    "message": "Remove GMAIL_APP_PASSWORD from .env and revoke it in your Google account to keep it disconnected.",
+                }
             try:
                 async with self.client() as client:
                     r = await client.post(

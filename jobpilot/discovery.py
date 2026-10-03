@@ -94,7 +94,10 @@ async def rank(db, config, job_id):
             "Evaluate role, seniority, location, must-have skills and explicit eligibility. "
             "Unknown sponsorship is an uncertainty, not proof of sponsorship. Hard mismatches "
             "make eligible=false. Do not tailor or create resumes. Choose only a supplied resume_id. "
-            "Use score 0-100. Missing eligibility facts must be listed under uncertainties.",
+            "Use score 0-100. Only list uncertainties for an explicit mandatory eligibility condition "
+            "in this posting that the applicant facts cannot resolve. Do not turn preferred skills, "
+            "unstated sponsorship policy, or optional experience into review blockers. Treat target "
+            "location ANY as no location restriction. Assess skill gaps in the score and reason.",
             json.dumps(
                 {
                     "profile": profile.model_dump(),
@@ -110,14 +113,16 @@ async def rank(db, config, job_id):
     ready = (
         result.eligible
         and result.score >= profile.minimum_fit
-        and not result.uncertainties
+        and (not result.uncertainties or profile.autonomous)
         and result.resume_id
     )
     with db.session() as s:
         item = s.get(Job, job_id)
         item.score, item.reason, item.resume_id = result.score, result.reason, result.resume_id
         item.reason += (" | Unresolved: " + "; ".join(result.uncertainties)) if result.uncertainties else ""
-        item.status = "ready" if ready else "review" if result.eligible else "skipped"
+        item.status = (
+            "ready" if ready else "review" if result.eligible and not profile.autonomous else "skipped"
+        )
     return result.model_dump()
 
 

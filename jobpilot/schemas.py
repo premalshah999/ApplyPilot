@@ -8,6 +8,16 @@ class Evidence(BaseModel):
     text: str = Field(min_length=1, max_length=8000)
 
 
+class ReviewedAnswer(BaseModel):
+    id: str
+    question: str
+    answer: str
+    options: list[str] = Field(default_factory=list)
+    employer: str = ""
+    scope: Literal["personal", "employer"] = "employer"
+    layer: Literal["fact", "narrative"] = "fact"
+
+
 class Profile(BaseModel):
     name: str = ""
     email: str = ""
@@ -25,6 +35,12 @@ class Profile(BaseModel):
     approved_consents: list[str] = Field(default_factory=list)
     # Exact question + options answers. No fuzzy reuse of legally meaningful questions.
     approved_answers: dict[str, str] = Field(default_factory=dict)
+    reviewed_answers: list[ReviewedAnswer] = Field(default_factory=list, max_length=2000)
+    application_source: str = ""
+    allow_account_creation: bool = False
+    allow_application_consents: bool = False
+    accept_all_application_terms: bool = False
+    autonomous: bool = False
 
 
 class JobInput(BaseModel):
@@ -76,3 +92,13 @@ class FitResult(BaseModel):
     resume_id: str | None
     reason: str
     uncertainties: list[str] = Field(default_factory=list)
+
+
+class KnowledgeNote(BaseModel):
+    category: Literal["education", "employment", "skill", "achievement", "project"]
+    evidence_id: str
+    quote: str = Field(min_length=1, max_length=2500)
+
+
+class KnowledgeNotes(BaseModel):
+    notes: list[KnowledgeNote] = Field(max_length=40)

@@ -95,7 +95,7 @@ class EmailBrowser:
             if f["type"] in {"text", "tel", "number", "password"}
             and (CODE_LABEL.fullmatch(f["label"]) or f.get("autocomplete") == "one-time-code")
         ]
-        if not codes and CODE.search(observation["text"]):
+        if (not codes or all(f["maxlength"] == 1 for f in codes)) and CODE.search(observation["text"]):
             digits = [f for f in fields if f["maxlength"] == 1 and f["type"] in {"text", "tel", "number"}]
             if 4 <= len(digits) <= 10:
                 codes = digits
@@ -115,6 +115,27 @@ class EmailBrowser:
             "email_wait",
             "Waiting for a matching employer verification email",
             {"challenge_id": c["id"], "kind": kind},
+        )
+
+    async def prepare_submission(self):
+        if not self.rule or self.challenge_id:
+            return
+        # Shared ATS senders are serialized only while sending/receiving a code.
+        for _ in range(60):
+            try:
+                self.begin()
+                return
+            except ValueError as exc:
+                if "Another application is verifying" not in str(exc):
+                    raise
+                await asyncio.sleep(1)
+        raise ValueError("Another verification is still active; retry this application later")
+
+    def greenhouse_submission(self, obs):
+        return (
+            self.engine.job.get("ats") == "greenhouse"
+            and self.engine.armed
+            and bool(re.search(r"to submit your application.{0,100}code", obs["text"], re.I | re.S))
         )
 
     async def before_click(self, control_id):
@@ -151,7 +172,18 @@ class EmailBrowser:
         ):
             raise ValueError("SMS verification requires an employer session; Gmail cannot supply this code")
         if not self.rule:
-            raise ValueError("Email verification needs a connected mailbox and employer rule in Settings")
+            from datetime import datetime
+
+            started = e.run_record.get('started_at')
+            since = datetime.fromisoformat(started).timestamp() if started else time.time()
+            e.emit('email_wait', 'Identifying this employer’s verification email automatically')
+            for _ in range(6):
+                self.rule = await self.mail.discover_rule(e.job, e.form.resolver.profile.email, since)
+                if self.rule:
+                    break
+                await asyncio.sleep(3)
+            if not self.rule:
+                raise ValueError("No authenticated verification email could be linked uniquely to this employer")
         if self.attempts:
             raise ValueError("Email verification did not complete; automatic resends are disabled")
         if origin(e.page.url) not in self.rule["link_origins"]:
@@ -161,7 +193,7 @@ class EmailBrowser:
         other = [
             f for f in obs["fields"] if f["id"] not in code_ids and f["type"] not in {"email", "checkbox"}
         ]
-        if other:
+        if other and not self.greenhouse_submission(obs):
             raise ValueError(
                 "Email challenge is mixed with application fields; requires an employer-specific adapter"
             )
@@ -185,7 +217,7 @@ class EmailBrowser:
                 ):
                     raise ValueError("Verification page changed to an origin outside the employer rule")
                 code_ids = {f["id"] for f in fields}
-                if any(
+                if not self.greenhouse_submission(obs) and any(
                     f["id"] not in code_ids and f["type"] not in {"email", "checkbox"} for f in obs["fields"]
                 ):
                     raise ValueError("Verification page changed to a mixed application step")
@@ -195,15 +227,44 @@ class EmailBrowser:
                 if len(fields) > 1 and len(code) != len(fields):
                     raise ValueError("Verification code length does not match the website")
                 buttons = [b for b in obs["controls"] if CONFIRM.fullmatch(b["label"])]
+                if self.greenhouse_submission(obs):
+                    buttons = [
+                        b for b in obs["controls"] if re.fullmatch(r"submit application", b["label"], re.I)
+                    ]
                 if len(buttons) > 1:
                     raise ValueError("Verification control is ambiguous")
                 button = await e.form.locator(buttons[0]["id"]).element_handle() if buttons else None
+                filled = 0
                 for i, f in enumerate(fields):
                     el = e.form.locator(f["id"])
                     # Hold the original DOM node, never a locator that could match a new page.
                     handle = await el.element_handle()
                     self.secret_fields.append(handle)
                     await el.fill(code if len(fields) == 1 else code[i], timeout=3000)
+                    filled += 1
+                e.emit(
+                    "email_step",
+                    "Verification code entered in employer form",
+                    {
+                        "fields": len(fields),
+                        "filled": filled,
+                    },
+                )
+                if self.greenhouse_submission(obs) and not button:
+                    # Greenhouse enables Submit only after all code digits are filled.
+                    refreshed = await e.form.scan()
+                    if (
+                        not self.greenhouse_submission(refreshed)
+                        or origin(e.page.url) not in self.rule["link_origins"]
+                    ):
+                        raise ValueError("Application verification changed before confirmation")
+                    enabled = [
+                        b
+                        for b in refreshed["controls"]
+                        if re.fullmatch(r"submit application", b["label"], re.I)
+                    ]
+                    if len(enabled) == 1:
+                        button = await e.form.locator(enabled[0]["id"]).element_handle()
                 if button and await button.is_visible():
                     # Capability is scoped to this inspected auth control, not the application's submit guard.
                     await button.evaluate("el => el.dataset.jpAuthControl='true'")
@@ -214,6 +275,7 @@ class EmailBrowser:
                             await button.evaluate("el => delete el.dataset.jpAuthControl")
                         except Exception:
                             pass
+                    e.emit("email_step", "Employer verification control clicked")
                 # Zero buttons supports code inputs which auto-submit on the final character.
             else:
                 e.verification_origins = set(self.rule["link_origins"])
@@ -221,10 +283,10 @@ class EmailBrowser:
                     e.page, e.verification_origins, e.config.allow_private_urls
                 ).start()
                 await e.page.goto(token["value"], wait_until="domcontentloaded", timeout=15000)
-            for _ in range(30):
+            for _ in range(60):
                 if guard and guard.blocked:
                     raise ValueError("Verification redirect is outside the employer rule")
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.25)
                 after = await e.form.scan()
                 pending, _ = self.state(after)
                 personal = [
@@ -234,7 +296,7 @@ class EmailBrowser:
                     or re.search(r"^(?:first name|last name|full name|phone|resume|cv)$", f["label"], re.I)
                 ]
                 explicit = re.search(
-                    r"email (?:address )?(?:has been |is )?verified|verification (?:complete|successful)|successfully (?:verified|signed in)",
+                    r"email (?:address )?(?:has been |is )?verified|verification (?:complete|successful)|successfully (?:verified|signed in)|thank you for applying|application (?:has been |was )?(?:successfully )?submitted|(?:your )?application (?:has been |was )?received|received your application",
                     after["text"],
                     re.I,
                 )
@@ -262,6 +324,18 @@ class EmailBrowser:
                         secret_keys,
                     )
                     return True
+            after = await e.form.scan()
+            e.emit(
+                "email_step",
+                "Verification did not reach a confirmed transition",
+                {
+                    "code_fields_remaining": len(self.state(after)[1]),
+                    "confirmation_found": bool(await e.form.proof()),
+                    "submit_controls": sum(
+                        bool(re.fullmatch(r"submit application", b["label"], re.I)) for b in after["controls"]
+                    ),
+                },
+            )
             raise ValueError("No verified transition after entering the code or opening the link")
         except Exception as exc:
             self.mail.outcome(

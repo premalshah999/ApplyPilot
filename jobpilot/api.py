@@ -175,6 +175,7 @@ def create_app(config: Settings | None = None):
     @app.get("/api/snapshot")
     async def snapshot():
         day = datetime.now(ZoneInfo(config.timezone)).date().isoformat()
+        profile = Profile.model_validate(db.get_setting("profile", {}))
         with db.session() as s:
             jobs = [record(x) for x in s.scalars(select(Job).order_by(Job.created_at.desc()).limit(1000))]
             runs = [
@@ -185,10 +186,16 @@ def create_app(config: Settings | None = None):
                 {k: v for k, v in record(x).items() if k not in {"text", "filename"}}
                 for x in s.scalars(select(Resume).where(Resume.demo.is_(False)))
             ]
-            reviews = [
-                record(x)
-                for x in s.scalars(select(Review).where(Review.answer.is_(None)).order_by(Review.created_at))
-            ]
+            reviews = (
+                []
+                if profile.autonomous
+                else [
+                    record(x)
+                    for x in s.scalars(
+                        select(Review).where(Review.answer.is_(None)).order_by(Review.created_at)
+                    )
+                ]
+            )
             budget = s.get(Budget, day)
             spend, submissions = (budget.spent, budget.submissions) if budget else (0, 0)
             sources = [record(x) for x in s.scalars(select(Source))]
@@ -211,7 +218,7 @@ def create_app(config: Settings | None = None):
             "resumes": resumes,
             "reviews": reviews,
             "sources": sources,
-            "profile": Profile.model_validate(db.get_setting("profile", {})).model_dump(),
+            "profile": profile.model_dump(),
             "control": db.get_setting("control"),
             "ats": catalog(),
             "stats": {
@@ -251,6 +258,12 @@ def create_app(config: Settings | None = None):
                     **row.value.get("approved_answers", {}),
                     **value["approved_answers"],
                 }
+                value["reviewed_answers"] = list(
+                    {
+                        a["id"]: a
+                        for a in [*value["reviewed_answers"], *row.value.get("reviewed_answers", [])]
+                    }.values()
+                )
                 row.value = value
             else:
                 s.add(Setting(key="profile", value=value))
@@ -265,11 +278,28 @@ def create_app(config: Settings | None = None):
             await resume(service)
         return data
 
+    @app.post("/api/profile/organize")
+    async def organize_profile():
+        from .knowledge import organize
+
+        return await organize(db, config)
+
     @app.post("/api/jobs")
     async def import_job(data: JobInput):
         await public_url(data.url, config.allow_private_urls)
         row, created = add_job(db, data)
-        return {"job": row, "created": created}
+        result = {"job": row, "created": created}
+        profile = db.get_setting("profile", {})
+        if created and profile.get("autonomous") and db.get_setting("control", {}).get("auto_submit"):
+            try:
+                await rank(db, config, row["id"])
+                with db.session() as s:
+                    result["job"] = record(s.get(Job, row["id"]))
+                if result["job"]["status"] == "ready":
+                    result["run"] = await service.queue(row["id"], "submit")
+            except (ValueError, RuntimeError) as exc:
+                result["notice"] = str(exc)[:300]
+        return result
 
     @app.post("/api/jobs/{job_id}/rank")
     async def classify(job_id: str):
@@ -348,9 +378,15 @@ def create_app(config: Settings | None = None):
         service.reconcile(run_id, data.submitted, data.evidence)
         return {"reconciled": True}
 
+    @app.post("/api/runs/{run_id}/check-email")
+    async def check_email(run_id: str):
+        from .receipts import check_receipts
+
+        return await check_receipts(service.mail, run_id)
+
     @app.post("/api/reviews/{review_id}")
     async def review(review_id: str, data: AnswerInput):
-        return service.answer_review(review_id, data.answer)
+        return await service.resolve_review(review_id, data.answer)
 
     @app.post("/api/resumes")
     async def upload_resume(file: UploadFile = File(...), name: str = Form(...), roles: str = Form("")):

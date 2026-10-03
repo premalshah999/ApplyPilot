@@ -13,6 +13,11 @@ from jobpilot.config import Settings
 @pytest.fixture
 def config(tmp_path):
     return Settings(
+        _env_file=None,
+        gmail_address="", gmail_app_password="", telegram_bot_token="", telegram_user_id="",
+        mimo_api_key="", google_client_id="", google_client_secret="",
+        browser_cdp_url="",
+        capsolver_api_key="", twocaptcha_api_key="", application_password="",
         data_dir=tmp_path,
         app_token="test-access-token",
         enable_workers=False,
