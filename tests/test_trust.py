@@ -243,3 +243,45 @@ async def test_no_secret_reaches_events_or_traces(service, prepared, tmp_path):
         assert "739104" not in events
         assert s.get(MailChallenge, challenge["id"]).payload == ""  # Consumed and erased.
     assert time.time() > 0 and datetime.now(UTC)
+
+
+async def test_existing_confirmations_survive_upgrade_and_receipt_checks(service, prepared):
+    """The six live confirmations recorded by main keep their state and evidence."""
+    from jobpilot.receipts import check_receipts
+    from jobpilot.service import Service
+
+    gmail = FakeGmail(EMAIL).connect(service)
+    companies = ["Blend", "My Funded Futures", "Cargomatic", "Zip Co", "May Mobility", "Ramp"]
+    ids = {}
+    for i, company in enumerate(companies):
+        job, _ = add_job(service.db, JobInput(url=f"https://jobs.example.test/{i}", company=company, title="AI Engineer"))
+        with service.db.exclusive() as s:
+            run = Run(
+                job_id=job["id"], mode="submit", state="confirmed", reason="Website confirmation captured",
+                packet={"profile": {"email": EMAIL}}, resume_id=prepared["id"],
+                receipt={"type": "explicit_confirmation_page", "url": f"https://jobs.example.test/{i}/thanks"}
+                if i % 2 else {"type": "explicit_confirmation_page", "email": {"message_id": f"m{i}"}},
+            )
+            s.add(run)
+            s.flush()
+            s.get(Job, job["id"]).status = "confirmed"
+            ids[run.id] = dict(run.receipt)
+    Service(service.db, service.config)  # Startup migrations on an upgraded database.
+    gmail.deliver(EMAIL, "promo@deals.shopping.test", "Thank you for applying to Ramp",
+                  "Thank you for applying to Ramp for the AI Engineer position. We received your application.")
+    await check_receipts(service.mail)
+    with service.db.session() as s:
+        for run_id, receipt in ids.items():
+            row = s.get(Run, run_id)
+            assert row.state == "confirmed"
+            assert {k: row.receipt[k] for k in receipt} == receipt  # Original evidence untouched.
+            assert row.receipt.get("email_confirmed") in (None, False) or "email" in receipt
+    # None of them can be applied to again.
+    for run_id in ids:
+        with service.db.session() as s:
+            job_id = s.get(Run, run_id).job_id
+        try:
+            await service.queue(job_id, "submit", prepared["id"], retry=True)
+            raise AssertionError("A confirmed job was queued again")
+        except ValueError as exc:
+            assert "submitted" in str(exc) or "uncertain" in str(exc)
